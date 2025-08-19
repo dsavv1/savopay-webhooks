@@ -8,26 +8,53 @@ const crypto = require("crypto");
 const app = express();
 
 // ───────────────────────────────────────────────────────────
+// CORS (handy for dashboards / tests)
+app.use(cors());
+
 // Parsers
-// Keep raw body for any generic /webhook endpoints (if you later verify HMAC on raw payloads)
+// Keep RAW body for any generic /webhook endpoints where you might verify HMAC on raw payloads later
 app.use("/webhook", express.raw({ type: "*/*" }));
 
 // ForumPay sends x-www-form-urlencoded to your callback_url
 app.use("/forumpay/callback", express.urlencoded({ extended: false }));
 
-// Allow cross-origin (handy for quick tests / dashboards)
-app.use(cors());
+// Optional JSON parser for any future JSON endpoints
+app.use(express.json());
 
 // ───────────────────────────────────────────────────────────
-// Health checks (Render will hit /healthz)
+// Health checks (Render probes this)
 app.get("/", (_req, res) => res.send("SavoPay API is live"));
 app.get("/healthz", (_req, res) => res.send("ok"));
 
 // ───────────────────────────────────────────────────────────
-// Optional signature verification for raw /webhook endpoints
+// Minimal in-memory store for payment statuses
+// NOTE: This resets on redeploy; good for sandbox. Swap with a DB for production.
+const payments = new Map();
+
+function savePayment({ payment_id, ...rest }) {
+  if (!payment_id) return null;
+  const current = payments.get(payment_id) || {};
+  const next = { ...current, ...rest, payment_id, updated_at: new Date().toISOString() };
+  payments.set(payment_id, next);
+  return next;
+}
+
+function getPayment(id) {
+  return payments.get(id);
+}
+
+// Read API so your POS/app can poll YOUR backend instead of ForumPay
+app.get("/payments/:id", (req, res) => {
+  const data = getPayment(req.params.id);
+  if (!data) return res.status(404).json({ err: "unknown payment_id" });
+  res.json(data);
+});
+
+// ───────────────────────────────────────────────────────────
+// Optional signature verification for raw /webhook endpoints (not used by /forumpay/callback)
 function verifySignature(req) {
   const secret = process.env.FORUMPAY_WEBHOOK_SECRET || "";
-  if (!secret) return true; // skip until you have a secret
+  if (!secret) return true; // skip until you configure a secret
   const sig = req.header("x-forumpay-signature") || "";
   try {
     const digest = crypto.createHmac("sha256", secret).update(req.body).digest("hex");
@@ -51,24 +78,25 @@ function handleWebhook(kind) {
     }
 
     console.log(`[WEBHOOK:${kind}]`, new Date().toISOString(), payload);
-    // TODO: update DB, etc.
     res.sendStatus(200);
   };
 }
 
-// Generic raw webhooks you already had (safe to keep)
+// Keep your generic raw webhooks (if you need them later)
 app.post("/webhook/payments", handleWebhook("payments"));
 app.post("/webhook/subscriptions", handleWebhook("subscriptions"));
 app.post("/webhook", handleWebhook("generic"));
 
 // ───────────────────────────────────────────────────────────
-// ForumPay callback (form-encoded) — THIS is what you set as callback_url
+// ForumPay callback (form-encoded) — set this as StartPayment callback_url
 app.post("/forumpay/callback", (req, res) => {
-  // Example fields you might see (names can vary by provider):
-  // payment_id, status, amount, currency, invoice_amount, invoice_currency, etc.
-  console.log("[FORUMPAY CALLBACK]", new Date().toISOString(), req.body);
+  // ForumPay typically posts fields like: payment_id, status, currency, amount, invoice_currency, invoice_amount, etc.
+  const { payment_id, status } = req.body || {};
+  const record = savePayment({ payment_id, status, raw: req.body });
 
-  // TODO: look up the order by req.body.payment_id and mark paid/confirmed accordingly
+  console.log("[FORUMPAY CALLBACK]", new Date().toISOString(), record || req.body);
+  // TODO (prod): verify signature if ForumPay provides one, enrich from payInfo.api, persist to DB
+
   res.sendStatus(200);
 });
 
