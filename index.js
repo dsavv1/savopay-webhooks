@@ -28,8 +28,8 @@ app.get("/", (_req, res) => res.send("SavoPay API is live"));
 app.get("/healthz", (_req, res) => res.send("ok"));
 
 // ───────────────────────────────────────────────────────────
-// SQLite persistence (survives restarts on same instance)
-const db = new Database("./payments.db");
+// SQLite persistence (use Render's writable temp dir)
+const db = new Database("/tmp/payments.db");
 
 // Create table once
 db.exec(`
@@ -60,8 +60,15 @@ const upsertStmt = db.prepare(`
     raw_json=excluded.raw_json,
     updated_at=excluded.updated_at
 `);
+
 const getByPaymentId = db.prepare(`SELECT * FROM payments WHERE payment_id = ?`);
 const getByOrderId   = db.prepare(`SELECT * FROM payments WHERE order_id = ?`);
+const listRecent     = db.prepare(`
+  SELECT payment_id, order_id, status, updated_at
+  FROM payments
+  ORDER BY updated_at DESC
+  LIMIT 50
+`);
 
 // Helpers
 function savePayment(row) {
@@ -160,6 +167,11 @@ app.get("/orders/:order_id", (req, res) => {
   const data = getByOrderId.get(req.params.order_id);
   if (!data) return res.status(404).json({ err: "unknown order_id" });
   res.json({ ...data, raw: JSON.parse(data.raw_json || "{}") });
+});
+
+// Debug: list most recent rows (helps verify writes/reads on the same instance)
+app.get("/debug/payments", (_req, res) => {
+  res.json({ rows: listRecent.all() });
 });
 
 // ───────────────────────────────────────────────────────────
