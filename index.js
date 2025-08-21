@@ -29,7 +29,7 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // curl/Postman
+      if (!origin) return cb(null, true); // curl/Postman or same-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
       return cb(null, false); // no CORS headers, but no crash
     },
@@ -41,18 +41,22 @@ app.use(
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 
-// ForumPay PROD dashboard creds (you had these already)
-const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
-const FP_USER = process.env.FORUMPAY_USER;
-const FP_PASS = process.env.FORUMPAY_PASS;
+// ForumPay PROD dashboard (your existing /api/* info endpoints)
+const FP_BASE =
+  process.env.FORUMPAY_API_BASE ||
+  'https://dashboard.forumpay.com/pay/payInfo.api';
+const FP_USER = process.env.FORUMPAY_USER || '';
+const FP_PASS = process.env.FORUMPAY_PASS || '';
 
-// ForumPay SANDBOX payment API (for /start-payment)
+// ForumPay SANDBOX payment API (for /start-payment & CheckPayment)
 const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
 const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
 const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
+
+// Webhook settings
 const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
-const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || '';
+const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
 const basicAuthHeader =
   'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
@@ -83,7 +87,12 @@ const store = {
     const created_at = row.created_at || nowIso();
     if (i >= 0) mem.payments[i] = { ...mem.payments[i], ...row, created_at: mem.payments[i].created_at || created_at };
     else mem.payments.push({ ...row, created_at });
-  }
+  },
+  async update(payment_id, update) {
+    const i = mem.payments.findIndex(p => p.payment_id === payment_id);
+    if (i >= 0) mem.payments[i] = { ...mem.payments[i], ...update };
+    else mem.payments.push({ payment_id, created_at: nowIso(), ...update });
+  },
 };
 
 // ---------- UI endpoints (what the React app calls) ----------
@@ -109,7 +118,7 @@ app.post('/start-payment', async (req, res) => {
     } = req.body || {};
 
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-    const callback_url = CALLBACK_URL
+    const cb_url = CALLBACK_URL
       ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}`
       : '';
 
@@ -121,7 +130,7 @@ app.post('/start-payment', async (req, res) => {
     params.set('payer_ip_address', '203.0.113.10');
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
-    if (callback_url) params.set('callback_url', callback_url);
+    if (cb_url) params.set('callback_url', cb_url);
 
     // Call ForumPay Sandbox StartPayment
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
@@ -136,8 +145,8 @@ app.post('/start-payment', async (req, res) => {
     const text = await resp.text();
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
     console.log(`StartPayment ${resp.status}: ${text}`);
+
     if (!resp.ok) {
       return res.status(resp.status).json({ error: 'StartPayment failed', detail: data });
     }
@@ -178,7 +187,9 @@ app.get('/receipt/:payment_id', async (req, res) => {
 app.get('/receipt/:payment_id/print', async (req, res) => {
   const p = await store.getPayment(req.params.payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
-  res.type('html').send(`<html><body><h1>Receipt ${p.payment_id}</h1><p>Thank you.</p></body></html>`);
+  res
+    .type('html')
+    .send(`<html><body><h1>Receipt ${p.payment_id}</h1><p>Thank you.</p></body></html>`);
 });
 
 // (Optional) email receipt stub
@@ -198,10 +209,70 @@ app.get('/report/daily.csv', async (req, res) => {
   res.type('text/csv').send(`date,count\n${date},${rows.length}\n`);
 });
 
-// ---------- Your existing /api/* routes (kept intact) ----------
-if (!FP_USER || !FP_PASS) {
-  console.warn('⚠️ Missing FORUMPAY_USER or FORUMPAY_PASS in env for /api/* routes');
+// ---------- CheckPayment helper + Webhook ----------
+async function checkPaymentOnForumPay({ payment_id, currency, address }) {
+  const body = new URLSearchParams();
+  body.set('pos_id', POS_ID);
+  body.set('payment_id', payment_id);
+  body.set('currency', currency);
+  body.set('address', address);
+
+  const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
+    method: 'POST',
+    headers: {
+      Authorization: basicAuthHeader,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  const text = await resp.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  console.log(`🔎 CheckPayment ${resp.status}: ${text}`);
+  if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
+  return json;
 }
+
+app.post('/api/forumpay/callback', async (req, res) => {
+  try {
+    const token = req.query.token || '';
+    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+
+    const { payment_id, currency, address } = req.body || {};
+    if (!payment_id || !currency || !address) {
+      return res
+        .status(400)
+        .json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
+    }
+
+    const ck = await checkPaymentOnForumPay({ payment_id, currency, address });
+
+    const update = {
+      status: ck.status || ck.state || null,
+      state: ck.state || null,
+      confirmed: ck.confirmed ? 1 : 0,
+      confirmed_time: ck.confirmed_time || null,
+      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
+      print_string: ck.print_string || null,
+      amount_exchange: ck.amount_exchange || null,
+      network_processing_fee: ck.network_processing_fee || null,
+      last_transaction_time: ck.last_transaction_time || null,
+      invoice_date: ck.invoice_date || null,
+      payer_id: ck.payer_id || null,
+    };
+    await store.update(payment_id, update);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('callback error', e);
+    res.status(500).json({ error: 'Internal error', detail: e.message });
+  }
+});
+
+// ---------- Your existing /api/* routes (kept intact) ----------
 const fpHeaders = () => ({
   Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64'),
 });
@@ -258,7 +329,9 @@ app.get('/api/subaccount', async (req, res) => {
 
 // Root info
 app.get('/', (_req, res) => {
-  res.type('text').send('SavoPay API is running. Try /health, /payments, /start-payment or /api/health');
+  res
+    .type('text')
+    .send('SavoPay API is running. Try /health, /payments, /start-payment or /api/health');
 });
 
 // ---------- Start ----------
@@ -269,6 +342,7 @@ app.listen(PORT, () => {
     pay_secret_present: !!PAY_SECRET,
     pos_id: POS_ID,
     callback_url: CALLBACK_URL,
+    webhook_token_present: !!WEBHOOK_TOKEN,
     dash_api_base: FP_BASE,
     dash_user_present: !!FP_USER,
     dash_pass_present: !!FP_PASS,
