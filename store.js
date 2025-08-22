@@ -1,4 +1,4 @@
-// store.js — Postgres persistence for SavoPay
+// store.js — Postgres persistence for SavoPay (with auto-migrations)
 import pkg from 'pg';
 const { Pool } = pkg;
 
@@ -7,33 +7,42 @@ const pool = new Pool({
   ssl: process.env.PGSSL_DISABLE ? false : { rejectUnauthorized: false },
 });
 
-async function init() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS payments (
-      payment_id TEXT PRIMARY KEY,
-      order_id TEXT,
-      pos_id TEXT,
-      address TEXT,
-      currency TEXT,
-      invoice_amount TEXT,
-      invoice_currency TEXT,
-      crypto_amount TEXT,
-      status TEXT,
-      state TEXT,
-      confirmed INTEGER,
-      confirmed_time TEXT,
-      payer_id TEXT,
-      customer_email TEXT,
-      print_string TEXT,
-      created_at TEXT,
-      amount_exchange TEXT,
-      network_processing_fee TEXT,
-      last_transaction_time TEXT,
-      invoice_date TEXT
-    );
-  `);
+// Ensure table exists and add any missing columns
+async function ensureSchema() {
+  // Create minimal table first so ALTERs can run safely
+  await pool.query(`CREATE TABLE IF NOT EXISTS payments (
+    payment_id TEXT PRIMARY KEY
+  )`);
+
+  // Required columns and types
+  const cols = {
+    order_id: 'TEXT',
+    pos_id: 'TEXT',
+    address: 'TEXT',
+    currency: 'TEXT',
+    invoice_amount: 'TEXT',
+    invoice_currency: 'TEXT',
+    crypto_amount: 'TEXT',
+    status: 'TEXT',
+    state: 'TEXT',
+    confirmed: 'INTEGER',
+    confirmed_time: 'TEXT',
+    payer_id: 'TEXT',
+    customer_email: 'TEXT',
+    print_string: 'TEXT',
+    created_at: 'TEXT',
+    amount_exchange: 'TEXT',
+    network_processing_fee: 'TEXT',
+    last_transaction_time: 'TEXT',
+    invoice_date: 'TEXT'
+  };
+
+  for (const [name, type] of Object.entries(cols)) {
+    await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+  }
 }
-await init();
+
+await ensureSchema();
 
 export const store = {
   async listPayments() {
