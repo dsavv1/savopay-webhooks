@@ -6,8 +6,6 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { store } from './store.js';
-import pkg from 'pg'; // for /debug/db
-const { Pool } = pkg;
 
 // ---------- Setup ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -175,9 +173,12 @@ app.get('/receipt/:payment_id/print', async (req, res) => {
     .send(`<html><body><h1>Receipt ${p.payment_id}</h1><p>Thank you.</p></body></html>`);
 });
 
-// (Optional) email receipt stub
-app.post('/payments/:payment_id/email', async (_req, res) => {
-  return res.status(204).end();
+// Email receipt (returns JSON so UI doesn't crash; wire real email later)
+app.post('/payments/:payment_id/email', async (req, res) => {
+  const payment_id = req.params.payment_id;
+  const { to_email } = req.body || {};
+  if (!to_email) return res.status(400).json({ error: 'to_email is required' });
+  return res.json({ ok: true, payment_id, to: to_email });
 });
 
 // Daily report stubs
@@ -341,24 +342,6 @@ app.get('/api/subaccount', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: 'GetSubAccount error', details: String(e) });
-  }
-});
-
-// ---------- Debug: DB connectivity & tables ----------
-app.get('/debug/db', async (_req, res) => {
-  try {
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.PGSSL_DISABLE ? false : { rejectUnauthorized: false },
-    });
-    const info = await pool.query('select now() as now, current_user as user, current_database() as db');
-    const tables = await pool.query(
-      "select table_name from information_schema.tables where table_schema='public' order by 1"
-    );
-    await pool.end();
-    res.json({ ok: true, info: info.rows[0], tables: tables.rows.map(r => r.table_name) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
