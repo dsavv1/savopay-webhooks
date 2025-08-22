@@ -32,7 +32,7 @@ app.use(
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // curl/Postman or same-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false); // no CORS headers, but no crash
+      return cb(null, false);
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -68,6 +68,25 @@ async function parseMaybeJson(res) {
   const text = await res.text();
   try { return { kind: 'json', data: JSON.parse(text) }; }
   catch { return { kind: 'html', data: text }; }
+}
+
+function renderReceiptHTML(print_string) {
+  let html = print_string || "";
+  html = html
+    .replace(/<SMALL>/g, "<div style='font-size:12px;'>")
+    .replace(/<\/SMALL>/g, "</div>")
+    .replace(/<BOLD>/g, "<b>")
+    .replace(/<\/BOLD>/g, "</b>")
+    .replace(/<BIG>/g, "<span style='font-size:18px'>")
+    .replace(/<\/BIG>/g, "</span>")
+    .replace(/<CENTER>/g, "<div style='text-align:center'>")
+    .replace(/<\/CENTER>/g, "</div>")
+    .replace(/<LINE>/g, "<hr style='border:none;border-top:1px dashed #aaa;margin:8px 0'/>")
+    .replace(/<DLINE>/g, "<hr style='border:none;border-top:2px solid #222;margin:10px 0'/>")
+    .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
+    .replace(/<QR>.*?<\/QR>/g, "")
+    .replace(/<BR>/g, "<br/>");
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}.card{max-width:420px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}.brand{font-weight:700;margin-bottom:4px}.meta{color:#6b7280;font-size:12px;margin-bottom:10px}@media print{body{padding:0}.card{box-shadow:none;border:none}}</style></head><body><div class="card"><div class="brand">SavoPay Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
 }
 
 // ---------- UI endpoints (what the React app calls) ----------
@@ -158,19 +177,47 @@ app.post('/start-payment', async (req, res) => {
   }
 });
 
-// Minimal receipt endpoints so the UI buttons work
+// JSON receipt (pulls print_string; falls back to CheckPayment once if missing)
 app.get('/receipt/:payment_id', async (req, res) => {
-  const p = await store.getPayment(req.params.payment_id);
+  const payment_id = req.params.payment_id;
+  const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).json({ error: 'Not found' });
-  res.json({ payment_id: p.payment_id, print_string: p.print_string || '' });
+
+  let print_string = p.print_string || '';
+  if (!print_string && p.address && p.currency) {
+    try {
+      const ck = await checkPaymentOnForumPay({
+        payment_id,
+        currency: p.currency,
+        address: p.address,
+      });
+      print_string = ck.print_string || '';
+      if (print_string) await store.update(payment_id, { print_string });
+    } catch {}
+  }
+  res.json({ payment_id, print_string });
 });
 
+// Printable HTML receipt (same fallback)
 app.get('/receipt/:payment_id/print', async (req, res) => {
-  const p = await store.getPayment(req.params.payment_id);
+  const payment_id = req.params.payment_id;
+  const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
-  res
-    .type('html')
-    .send(`<html><body><h1>Receipt ${p.payment_id}</h1><p>Thank you.</p></body></html>`);
+
+  let print_string = p.print_string || '';
+  if (!print_string && p.address && p.currency) {
+    try {
+      const ck = await checkPaymentOnForumPay({
+        payment_id,
+        currency: p.currency,
+        address: p.address,
+      });
+      print_string = ck.print_string || '';
+      if (print_string) await store.update(payment_id, { print_string });
+    } catch {}
+  }
+
+  res.type('html').send(renderReceiptHTML(print_string || ''));
 });
 
 // Email receipt (returns JSON so UI doesn't crash; wire real email later)
