@@ -6,6 +6,8 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { store } from './store.js';
+import pkg from 'pg'; // for /debug/db
+const { Pool } = pkg;
 
 // ---------- Setup ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -24,7 +26,7 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
   'https://savopay-ui-1.onrender.com',
-  process.env.ALLOWED_ORIGIN,
+  process.env.ALLOWED_ORIGIN, // e.g. https://savopay.co
 ].filter(Boolean);
 
 app.use(
@@ -42,7 +44,7 @@ app.use(
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 
-// ForumPay PROD dashboard (your existing /api/* info endpoints)
+// ForumPay PROD dashboard (your /api/* info endpoints)
 const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
 const FP_USER = process.env.FORUMPAY_USER || '';
 const FP_PASS = process.env.FORUMPAY_PASS || '';
@@ -75,10 +77,15 @@ async function parseMaybeJson(res) {
 // Health
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// List recent payments
+// List recent payments (with error detail)
 app.get('/payments', async (_req, res) => {
-  const rows = await store.listPayments();
-  res.json(rows);
+  try {
+    const rows = await store.listPayments();
+    res.json(rows);
+  } catch (e) {
+    console.error('payments error:', e);
+    res.status(500).json({ error: 'payments failed', detail: e.message });
+  }
 });
 
 // Start payment (SANDBOX)
@@ -100,7 +107,7 @@ app.post('/start-payment', async (req, res) => {
     params.set('invoice_amount', String(invoice_amount));
     params.set('invoice_currency', String(invoice_currency));
     params.set('currency', String(currency));
-    params.set('payer_ip_address', '203.0.113.10');
+    params.set('payer_ip_address', '203.0.113.10'); // or derive from X-Forwarded-For
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
@@ -337,6 +344,24 @@ app.get('/api/subaccount', async (req, res) => {
   }
 });
 
+// ---------- Debug: DB connectivity & tables ----------
+app.get('/debug/db', async (_req, res) => {
+  try {
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSL_DISABLE ? false : { rejectUnauthorized: false },
+    });
+    const info = await pool.query('select now() as now, current_user as user, current_database() as db');
+    const tables = await pool.query(
+      "select table_name from information_schema.tables where table_schema='public' order by 1"
+    );
+    await pool.end();
+    res.json({ ok: true, info: info.rows[0], tables: tables.rows.map(r => r.table_name) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Root info
 app.get('/', (_req, res) => {
   res.type('text').send('SavoPay API is running. Try /health, /payments, /start-payment or /api/health');
@@ -356,6 +381,7 @@ app.listen(PORT, () => {
     dash_pass_present: !!FP_PASS,
     port: String(PORT),
     allowed_origin_list: allowedOrigins,
+    db_url_present: !!process.env.DATABASE_URL,
   });
   console.log(`SavoPay running at http://localhost:${PORT}`);
 });
