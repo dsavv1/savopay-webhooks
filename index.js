@@ -6,6 +6,7 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { store } from './store.js';
+import nodemailer from 'nodemailer';
 
 // ---------- Setup ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -30,7 +31,7 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // curl/Postman or same-origin
+      if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
       return cb(null, false);
     },
@@ -56,6 +57,14 @@ const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 // Webhook settings
 const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
+
+// SMTP (real email)
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '0', 10);
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'receipts@savopay.local';
+const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
 
@@ -86,7 +95,24 @@ function renderReceiptHTML(print_string) {
     .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
     .replace(/<QR>.*?<\/QR>/g, "")
     .replace(/<BR>/g, "<br/>");
-  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}.card{max-width:420px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}.brand{font-weight:700;margin-bottom:4px}.meta{color:#6b7280;font-size:12px;margin-bottom:10px}@media print{body{padding:0}.card{box-shadow:none;border:none}}</style></head><body><div class="card"><div class="brand">SavoPay Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}.card{max-width:420px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}.brand{font-weight:700;margin-bottom:4px}.meta{color:#6b7280;font-size:12px;margin-bottom:10px}@media print{body{padding:0}.card{box-shadow:none;border:none}}</style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
+}
+
+function makeTransporter() {
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+    throw new Error('SMTP not configured');
+  }
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+async function sendReceiptEmail({ to, subject, html }) {
+  const tx = makeTransporter();
+  return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
 }
 
 // ---------- UI endpoints (what the React app calls) ----------
@@ -124,7 +150,7 @@ app.post('/start-payment', async (req, res) => {
     params.set('invoice_amount', String(invoice_amount));
     params.set('invoice_currency', String(invoice_currency));
     params.set('currency', String(currency));
-    params.set('payer_ip_address', '203.0.113.10'); // or derive from X-Forwarded-For
+    params.set('payer_ip_address', '203.0.113.10');
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
@@ -220,12 +246,42 @@ app.get('/receipt/:payment_id/print', async (req, res) => {
   res.type('html').send(renderReceiptHTML(print_string || ''));
 });
 
-// Email receipt (returns JSON so UI doesn't crash; wire real email later)
+// Email receipt — REAL email via SMTP
 app.post('/payments/:payment_id/email', async (req, res) => {
-  const payment_id = req.params.payment_id;
-  const { to_email } = req.body || {};
-  if (!to_email) return res.status(400).json({ error: 'to_email is required' });
-  return res.json({ ok: true, payment_id, to: to_email });
+  try {
+    const payment_id = req.params.payment_id;
+    const { to_email } = req.body || {};
+    if (!to_email) return res.status(400).json({ error: 'to_email is required' });
+
+    const p = await store.getPayment(payment_id);
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+
+    // Ensure we have print_string
+    let print_string = p.print_string || '';
+    if (!print_string && p.address && p.currency) {
+      try {
+        const ck = await checkPaymentOnForumPay({
+          payment_id,
+          currency: p.currency,
+          address: p.address,
+        });
+        print_string = ck.print_string || '';
+        if (print_string) await store.update(payment_id, { print_string });
+      } catch {}
+    }
+
+    const html = renderReceiptHTML(print_string || '');
+    await sendReceiptEmail({
+      to: to_email,
+      subject: `${BRAND_NAME} receipt – ${payment_id}`,
+      html,
+    });
+
+    res.json({ ok: true, payment_id, to: to_email });
+  } catch (e) {
+    console.error('email error:', e.message);
+    res.status(500).json({ error: 'Failed to send email', detail: e.message });
+  }
 });
 
 // Daily report stubs
@@ -337,7 +393,7 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
   }
 });
 
-// ---------- Your existing /api/* routes (kept intact) ----------
+// ---------- Your existing /api/* routes ----------
 const fpHeaders = () => ({
   Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64'),
 });
@@ -412,6 +468,7 @@ app.listen(PORT, () => {
     port: String(PORT),
     allowed_origin_list: allowedOrigins,
     db_url_present: !!process.env.DATABASE_URL,
+    smtp_present: !!SMTP_HOST && !!SMTP_PORT && !!SMTP_USER && !!SMTP_PASS,
   });
   console.log(`SavoPay running at http://localhost:${PORT}`);
 });
