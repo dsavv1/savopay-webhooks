@@ -1,4 +1,4 @@
-// index.js — SavoPay backend for UI + ForumPay helpers (Postgres-backed)
+// index.js — SavoPay backend (savopay-webhooks) with prod-only CORS allowlist
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -20,47 +20,54 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS (pos.savopay.co + Express 5 preflight fix) ----------
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:3002',
-  'https://savopay-ui-1.onrender.com',
-  'https://pos.savopay.co',
-  process.env.ALLOWED_ORIGIN,
-  process.env.UI_ORIGIN,
-].filter(Boolean);
+// ---------- CORS (Lock to prod only; dev still allows localhost) ----------
+const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+
+// In prod: only your POS origin. In dev: POS + localhost.
+const allowedOrigins = (isProd
+  ? [
+      'https://pos.savopay.co',
+      process.env.UI_ORIGIN, // should also be https://pos.savopay.co in prod
+    ]
+  : [
+      'http://localhost:3000',
+      'http://localhost:3002',
+      'https://pos.savopay.co',
+      process.env.UI_ORIGIN,
+    ]
+).filter(Boolean);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);               // allow curl/health/no-origin
+      if (!origin) return cb(null, true); // allow curl/health/no-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);                            // disallowed -> no CORS headers
+      return cb(null, false); // disallowed -> no CORS headers
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     optionsSuccessStatus: 204,
   })
 );
-// IMPORTANT: in Express 5 use a regex (NOT '*')
+// IMPORTANT (Express 5): use a RegExp instead of '*'
 app.options(/.*/, cors());
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 
-// ForumPay PROD dashboard (your /api/* info endpoints)
-const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
-const FP_USER = process.env.FORUMPAY_USER || '';
-const FP_PASS = process.env.FORUMPAY_PASS || '';
+// ForumPay dashboard info endpoints (optional)
+const FP_BASE  = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
+const FP_USER  = process.env.FORUMPAY_USER || '';
+const FP_PASS  = process.env.FORUMPAY_PASS || '';
 
-// ForumPay payment API (sandbox by default)
-const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
-const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
+// ForumPay payment API (sandbox or prod depending on env)
+const PAY_BASE   = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
+const PAY_USER   = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
-const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
+const POS_ID     = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 
 // Webhook settings
-const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
+const CALLBACK_URL  = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
 // SMTP (supports both SMTP_* and EMAIL_* env names)
@@ -164,10 +171,7 @@ async function checkPaymentOnForumPay({ payment_id, currency, address }) {
 
   const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
     method: 'POST',
-    headers: {
-      Authorization: basicAuthHeader,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
+    headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
 
@@ -216,7 +220,7 @@ async function buildEmailHtml(payment) {
   return renderPendingReceiptHTML(payment);
 }
 
-// ---------- UI endpoints (what the React app calls) ----------
+// ---------- UI endpoints (called by the React app) ----------
 
 // Health
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -258,10 +262,7 @@ app.post('/start-payment', async (req, res) => {
 
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
-      headers: {
-        Authorization: basicAuthHeader,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params,
     });
 
@@ -451,23 +452,19 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
     res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
   } catch (e) {
     console.error('recheck error', e);
-    res.status(500).json({ error: 'recheck failed', detail: String(e) });
+    res.status(500).json({ error: 'recheck failed', detail: e.message });
   }
 });
 
-// ---------- ForumPay info endpoints ----------
-const fpHeaders = () => ({
-  Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64'),
-});
+// ---------- ForumPay info endpoints (optional) ----------
+const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
 app.get('/api/health', async (_req, res) => {
   try {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
-    if (r.ok && parsed.kind === 'json') {
-      return res.json({ ok: true, status: r.status, data: parsed.data });
-    }
-    return res.status(r.status || 502).json({
+    if (r.ok && parsed.kind === 'json') return res.json({ ok: true, status: r.status, data: parsed.data });
+    res.status(r.status || 502).json({
       ok: false,
       status: r.status,
       note: 'Prod Ping is unreliable; this hits GetSubAccounts.',
@@ -518,6 +515,7 @@ app.get('/', (_req, res) => {
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log('ENV CHECK', {
+    node_env: process.env.NODE_ENV,
     pay_base: PAY_BASE,
     pay_user_present: !!PAY_USER,
     pay_secret_present: !!PAY_SECRET,
