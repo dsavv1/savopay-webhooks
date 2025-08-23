@@ -20,22 +20,22 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS (includes pos.savopay.co + fixed preflight handler) ----------
+// ---------- CORS (includes pos.savopay.co + fixed preflight for Express 5) ----------
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
   'https://savopay-ui-1.onrender.com',
-  'https://pos.savopay.co',       // production POS domain
-  process.env.ALLOWED_ORIGIN,     // e.g. https://pos.savopay.co
-  process.env.UI_ORIGIN,          // accept UI_ORIGIN env
+  'https://pos.savopay.co',         // production POS
+  process.env.ALLOWED_ORIGIN,       // e.g. https://pos.savopay.co
+  process.env.UI_ORIGIN,            // also accept UI_ORIGIN
 ].filter(Boolean);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);                 // allow curl/health/no-origin
+      if (!origin) return cb(null, true);                    // allow curl/health/no-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);                              // disallowed -> no CORS headers
+      return cb(null, false);                                 // disallowed -> no CORS headers
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -43,7 +43,7 @@ app.use(
   })
 );
 
-// IMPORTANT: Express 5 + path-to-regexp v6 needs a regex or '(.*)' here (NOT '*')
+// IMPORTANT: Express 5 + path-to-regexp v6 needs a regex or '(.*)' (NOT '*')
 app.options(/.*/, cors());
 
 // ---------- ENV ----------
@@ -64,12 +64,12 @@ const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
-// SMTP (real email)
-const SMTP_HOST = process.env.SMTP_HOST || '';
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || '0', 10);
-const SMTP_USER = process.env.SMTP_USER || '';
-const SMTP_PASS = process.env.SMTP_PASS || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'receipts@savopay.local';
+// SMTP (real email) — supports both SMTP_* and EMAIL_* env names
+const SMTP_HOST = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.office365.com';
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
+const SMTP_USER = process.env.SMTP_USER || process.env.EMAIL_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
+const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER || 'receipts@savopay.local';
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
@@ -112,13 +112,31 @@ function makeTransporter() {
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_PORT === 465,
+    requireTLS: SMTP_PORT === 587, // STARTTLS for 587
     auth: { user: SMTP_USER, pass: SMTP_PASS },
+    tls: { minVersion: 'TLSv1.2' },
   });
 }
 
 async function sendReceiptEmail({ to, subject, html }) {
   const tx = makeTransporter();
   return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
+}
+
+async function ensurePrintString(payment) {
+  let print_string = payment?.print_string || '';
+  if (!print_string && payment?.address && payment?.currency) {
+    try {
+      const ck = await checkPaymentOnForumPay({
+        payment_id: payment.payment_id,
+        currency: payment.currency,
+        address: payment.address,
+      });
+      print_string = ck.print_string || '';
+      if (print_string) await store.update(payment.payment_id, { print_string });
+    } catch {}
+  }
+  return print_string;
 }
 
 // ---------- UI endpoints (what the React app calls) ----------
@@ -209,84 +227,68 @@ app.post('/start-payment', async (req, res) => {
   }
 });
 
-// JSON receipt (pulls print_string; falls back to CheckPayment once if missing)
+// JSON receipt
 app.get('/receipt/:payment_id', async (req, res) => {
   const payment_id = req.params.payment_id;
   const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).json({ error: 'Not found' });
-
-  let print_string = p.print_string || '';
-  if (!print_string && p.address && p.currency) {
-    try {
-      const ck = await checkPaymentOnForumPay({
-        payment_id,
-        currency: p.currency,
-        address: p.address,
-      });
-      print_string = ck.print_string || '';
-      if (print_string) await store.update(payment_id, { print_string });
-    } catch {}
-  }
+  const print_string = await ensurePrintString(p);
   res.json({ payment_id, print_string });
 });
 
-// Printable HTML receipt (same fallback)
+// Printable HTML receipt
 app.get('/receipt/:payment_id/print', async (req, res) => {
   const payment_id = req.params.payment_id;
   const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
-
-  let print_string = p.print_string || '';
-  if (!print_string && p.address && p.currency) {
-    try {
-      const ck = await checkPaymentOnForumPay({
-        payment_id,
-        currency: p.currency,
-        address: p.address,
-      });
-      print_string = ck.print_string || '';
-      if (print_string) await store.update(payment_id, { print_string });
-    } catch {}
-  }
-
+  const print_string = await ensurePrintString(p);
   res.type('html').send(renderReceiptHTML(print_string || ''));
 });
 
-// Email receipt — REAL email via SMTP
+// Email receipt — Route A: /payments/:payment_id/email (existing)
 app.post('/payments/:payment_id/email', async (req, res) => {
   try {
     const payment_id = req.params.payment_id;
-    const { to_email } = req.body || {};
-    if (!to_email) return res.status(400).json({ error: 'to_email is required' });
+    const { to_email, email } = req.body || {}; // accept either key
+    const recipient = to_email || email;
+    if (!recipient) return res.status(400).json({ error: 'to_email is required' });
 
     const p = await store.getPayment(payment_id);
     if (!p) return res.status(404).json({ error: 'Payment not found' });
 
-    // Ensure we have print_string
-    let print_string = p.print_string || '';
-    if (!print_string && p.address && p.currency) {
-      try {
-        const ck = await checkPaymentOnForumPay({
-          payment_id,
-          currency: p.currency,
-          address: p.address,
-        });
-        print_string = ck.print_string || '';
-        if (print_string) await store.update(payment_id, { print_string });
-      } catch {}
-    }
-
-    const html = renderReceiptHTML(print_string || '');
-    await sendReceiptEmail({
-      to: to_email,
+    const html = renderReceiptHTML(await ensurePrintString(p));
+    const info = await sendReceiptEmail({
+      to: recipient,
       subject: `${BRAND_NAME} receipt – ${payment_id}`,
       html,
     });
-
-    res.json({ ok: true, payment_id, to: to_email });
+    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null });
   } catch (e) {
-    console.error('email error:', e.message);
-    res.status(500).json({ error: 'Failed to send email', detail: e.message });
+    console.error('email error (/payments/:id/email):', e);
+    res.status(500).json({ error: 'Failed to send email', detail: String(e) });
+  }
+});
+
+// Email receipt — Route B: /email-receipts (compat with older UI: { payment_id, to_email })
+app.post('/email-receipts', async (req, res) => {
+  try {
+    const { payment_id, to_email, email } = req.body || {};
+    const recipient = to_email || email;
+    if (!payment_id || !recipient) return res.status(400).json({ error: 'payment_id and to_email required' });
+
+    const p = await store.getPayment(payment_id);
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+
+    const html = renderReceiptHTML(await ensurePrintString(p));
+    const info = await sendReceiptEmail({
+      to: recipient,
+      subject: `${BRAND_NAME} receipt – ${payment_id}`,
+      html,
+    });
+    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null });
+  } catch (e) {
+    console.error('email error (/email-receipts):', e);
+    res.status(500).json({ error: 'Failed to send email', detail: String(e) });
   }
 });
 
@@ -474,7 +476,8 @@ app.listen(PORT, () => {
     port: String(PORT),
     allowed_origin_list: allowedOrigins,
     db_url_present: !!process.env.DATABASE_URL,
-    smtp_present: !!SMTP_HOST && !!SMTP_PORT && !!SMTP_USER && !!SMTP_PASS,
+    smtp_present: !!(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS),
+    smtp_from: FROM_EMAIL,
   });
   console.log(`SavoPay running at http://localhost:${PORT}`);
 });
