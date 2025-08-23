@@ -33,9 +33,9 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // curl/health/no-origin
+      if (!origin) return cb(null, true);               // allow curl/health/no-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);
+      return cb(null, false);                            // disallowed -> no CORS headers
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -49,18 +49,18 @@ app.options(/.*/, cors());
 const PORT = process.env.PORT || 3000;
 
 // ForumPay PROD dashboard (your /api/* info endpoints)
-const FP_BASE  = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
-const FP_USER  = process.env.FORUMPAY_USER || '';
-const FP_PASS  = process.env.FORUMPAY_PASS || '';
+const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
+const FP_USER = process.env.FORUMPAY_USER || '';
+const FP_PASS = process.env.FORUMPAY_PASS || '';
 
 // ForumPay payment API (sandbox by default)
-const PAY_BASE   = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
-const PAY_USER   = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
+const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
+const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
-const POS_ID     = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
+const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 
 // Webhook settings
-const CALLBACK_URL  = process.env.FORUMPAY_CALLBACK_URL || '';
+const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
 // SMTP (supports both SMTP_* and EMAIL_* env names)
@@ -84,7 +84,7 @@ async function parseMaybeJson(res) {
   catch { return { kind: 'html', data: text }; }
 }
 
-// Final receipt renderer (uses ForumPay print_string markup)
+// Render ForumPay print_string HTML
 function renderReceiptHTML(print_string) {
   let html = print_string || "";
   html = html
@@ -99,7 +99,7 @@ function renderReceiptHTML(print_string) {
     .replace(/<LINE>/g, "<hr style='border:none;border-top:1px dashed #aaa;margin:8px 0'/>")
     .replace(/<DLINE>/g, "<hr style='border:none;border-top:2px solid #222;margin:10px 0'/>")
     .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
-    .replace(/<QR>.*?<\/QR>/g, "") // strip QR tag content
+    .replace(/<QR>.*?<\/QR>/g, "")
     .replace(/<BR>/g, "<br/>");
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>
     body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}
@@ -110,7 +110,7 @@ function renderReceiptHTML(print_string) {
   </style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
 }
 
-// Pending receipt renderer (no print_string yet)
+// Pending/provisional HTML when not yet confirmed
 function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
@@ -154,6 +154,7 @@ async function sendReceiptEmail({ to, subject, html }) {
   return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
 }
 
+// ---------- ForumPay check + helpers ----------
 async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   const body = new URLSearchParams();
   body.set('pos_id', POS_ID);
@@ -163,7 +164,10 @@ async function checkPaymentOnForumPay({ payment_id, currency, address }) {
 
   const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
     method: 'POST',
-    headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      Authorization: basicAuthHeader,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
     body,
   });
 
@@ -175,7 +179,6 @@ async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   return json;
 }
 
-// Get/refresh print_string if possible
 async function ensurePrintString(payment) {
   let print_string = payment?.print_string || '';
   if (!print_string && payment?.address && payment?.currency) {
@@ -185,7 +188,6 @@ async function ensurePrintString(payment) {
         currency: payment.currency,
         address: payment.address,
       });
-      // Persist any new details we discover
       const update = {
         status: ck.status || ck.state || payment.status,
         state: ck.state || payment.state,
@@ -202,13 +204,12 @@ async function ensurePrintString(payment) {
       await store.update(payment.payment_id, update);
       print_string = update.print_string || '';
     } catch {
-      // ignore — still pending
+      // still pending
     }
   }
   return print_string;
 }
 
-// Build the email HTML: final if possible; otherwise pending/provisional
 async function buildEmailHtml(payment) {
   const printable = await ensurePrintString(payment);
   if (printable) return renderReceiptHTML(printable);
@@ -257,7 +258,10 @@ app.post('/start-payment', async (req, res) => {
 
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
-      headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        Authorization: basicAuthHeader,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
       body: params,
     });
 
@@ -315,7 +319,8 @@ app.get('/receipt/:payment_id/print', async (req, res) => {
   const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
   const printable = await ensurePrintString(p);
-  res.type('html').send(renderReceiptHTML(printable || ''));
+  if (printable) return res.type('html').send(renderReceiptHTML(printable));
+  return res.type('html').send(renderPendingReceiptHTML(p));
 });
 
 // Email receipt — Route A: /payments/:payment_id/email
@@ -378,15 +383,96 @@ app.get('/report/daily.csv', async (req, res) => {
   res.type('text/csv').send(`date,count\n${date},${rows.length}\n`);
 });
 
-// ---------- Extra /api/* helpers ----------
-const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
+// ---------- Webhook + Recheck ----------
+app.post('/api/forumpay/callback', async (req, res) => {
+  try {
+    const token = req.query.token || '';
+    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+
+    const { payment_id, currency, address } = req.body || {};
+    if (!payment_id || !currency || !address) {
+      return res.status(400).json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
+    }
+
+    const ck = await checkPaymentOnForumPay({ payment_id, currency, address });
+
+    const update = {
+      status: ck.status || ck.state || null,
+      state: ck.state || null,
+      confirmed: ck.confirmed ? 1 : 0,
+      confirmed_time: ck.confirmed_time || null,
+      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
+      print_string: ck.print_string || null,
+      amount_exchange: ck.amount_exchange || null,
+      network_processing_fee: ck.network_processing_fee || null,
+      last_transaction_time: ck.last_transaction_time || null,
+      invoice_date: ck.invoice_date || null,
+      payer_id: ck.payer_id || null,
+    };
+    await store.update(payment_id, update);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('callback error', e);
+    res.status(500).json({ error: 'Internal error', detail: e.message });
+  }
+});
+
+// Manual/forced re-check
+app.post('/payments/:payment_id/recheck', async (req, res) => {
+  try {
+    const payment_id = req.params.payment_id;
+    const saved = await store.getPayment(payment_id);
+    if (!saved) return res.status(404).json({ error: 'Payment not found' });
+
+    const ck = await checkPaymentOnForumPay({
+      payment_id,
+      currency: saved.currency,
+      address: saved.address,
+    });
+
+    const update = {
+      status: ck.status || ck.state || null,
+      state: ck.state || null,
+      confirmed: ck.confirmed ? 1 : 0,
+      confirmed_time: ck.confirmed_time || null,
+      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
+      print_string: ck.print_string || null,
+      amount_exchange: ck.amount_exchange || null,
+      network_processing_fee: ck.network_processing_fee || null,
+      last_transaction_time: ck.last_transaction_time || null,
+      invoice_date: ck.invoice_date || null,
+      payer_id: ck.payer_id || null,
+    };
+    await store.update(payment_id, update);
+
+    res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
+  } catch (e) {
+    console.error('recheck error', e);
+    res.status(500).json({ error: 'recheck failed', detail: String(e) });
+  }
+});
+
+// ---------- ForumPay info endpoints ----------
+const fpHeaders = () => ({
+  Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64'),
+});
 
 app.get('/api/health', async (_req, res) => {
   try {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
-    if (r.ok && parsed.kind === 'json') return res.json({ ok: true, status: r.status, data: parsed.data });
-    res.status(r.status || 502).json({ ok: false, status: r.status, note: 'Prod Ping is unreliable; this hits GetSubAccounts.', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
+    if (r.ok && parsed.kind === 'json') {
+      return res.json({ ok: true, status: r.status, data: parsed.data });
+    }
+    return res.status(r.status || 502).json({
+      ok: false,
+      status: r.status,
+      note: 'Prod Ping is unreliable; this hits GetSubAccounts.',
+      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -397,7 +483,10 @@ app.get('/api/subaccounts', async (_req, res) => {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({ error: 'GetSubAccounts failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
+    res.status(r.status || 502).json({
+      error: 'GetSubAccounts failed',
+      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
+    });
   } catch (e) {
     res.status(500).json({ error: 'GetSubAccounts error', details: String(e) });
   }
@@ -412,7 +501,10 @@ app.get('/api/subaccount', async (req, res) => {
     const r = await fetch(url, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({ error: 'GetSubAccount failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
+    res.status(r.status || 502).json({
+      error: 'GetSubAccount failed',
+      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
+    });
   } catch (e) {
     res.status(500).json({ error: 'GetSubAccount error', details: String(e) });
   }
