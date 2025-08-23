@@ -20,25 +20,30 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS ----------
+// ---------- CORS (updated to include pos.savopay.co + preflight handler) ----------
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
   'https://savopay-ui-1.onrender.com',
-  process.env.ALLOWED_ORIGIN, // e.g. https://savopay.co
+  'https://pos.savopay.co',       // <-- NEW: production POS domain
+  process.env.ALLOWED_ORIGIN,     // e.g. https://pos.savopay.co
+  process.env.UI_ORIGIN,          // also accept UI_ORIGIN env
 ].filter(Boolean);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
+      if (!origin) return cb(null, true);                 // allow curl/health/no-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);
+      return cb(null, false);                              // disallowed -> no CORS headers
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
+
+// Ensure all preflights receive proper CORS response
+app.options('*', cors());
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
