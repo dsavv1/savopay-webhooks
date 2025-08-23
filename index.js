@@ -20,56 +20,55 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS (includes pos.savopay.co + fixed preflight for Express 5) ----------
+// ---------- CORS (pos.savopay.co + Express 5 preflight fix) ----------
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
   'https://savopay-ui-1.onrender.com',
-  'https://pos.savopay.co',         // production POS
-  process.env.ALLOWED_ORIGIN,       // e.g. https://pos.savopay.co
-  process.env.UI_ORIGIN,            // also accept UI_ORIGIN
+  'https://pos.savopay.co',
+  process.env.ALLOWED_ORIGIN,
+  process.env.UI_ORIGIN,
 ].filter(Boolean);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);                    // allow curl/health/no-origin
+      if (!origin) return cb(null, true); // curl/health/no-origin
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);                                 // disallowed -> no CORS headers
+      return cb(null, false);
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     optionsSuccessStatus: 204,
   })
 );
-
-// IMPORTANT: Express 5 + path-to-regexp v6 needs a regex or '(.*)' (NOT '*')
+// IMPORTANT: in Express 5 use a regex (NOT '*')
 app.options(/.*/, cors());
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 
 // ForumPay PROD dashboard (your /api/* info endpoints)
-const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
-const FP_USER = process.env.FORUMPAY_USER || '';
-const FP_PASS = process.env.FORUMPAY_PASS || '';
+const FP_BASE  = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
+const FP_USER  = process.env.FORUMPAY_USER || '';
+const FP_PASS  = process.env.FORUMPAY_PASS || '';
 
-// ForumPay SANDBOX payment API (for /start-payment & CheckPayment)
-const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
-const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
+// ForumPay payment API (sandbox by default)
+const PAY_BASE   = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
+const PAY_USER   = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
-const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
+const POS_ID     = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 
 // Webhook settings
-const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
+const CALLBACK_URL  = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
-// SMTP (real email) — supports both SMTP_* and EMAIL_* env names
-const SMTP_HOST = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.office365.com';
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
-const SMTP_USER = process.env.SMTP_USER || process.env.EMAIL_USER || '';
-const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER || 'receipts@savopay.local';
+// SMTP (supports both SMTP_* and EMAIL_* env names)
+const SMTP_HOST  = process.env.SMTP_HOST  || process.env.EMAIL_HOST  || 'smtp.office365.com';
+const SMTP_PORT  = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
+const SMTP_USER  = process.env.SMTP_USER  || process.env.EMAIL_USER  || '';
+const SMTP_PASS  = process.env.SMTP_PASS  || process.env.EMAIL_PASS  || '';
+const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM  || SMTP_USER || 'receipts@savopay.local';
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
@@ -85,6 +84,7 @@ async function parseMaybeJson(res) {
   catch { return { kind: 'html', data: text }; }
 }
 
+// Final receipt renderer (uses ForumPay print_string markup)
 function renderReceiptHTML(print_string) {
   let html = print_string || "";
   html = html
@@ -99,9 +99,40 @@ function renderReceiptHTML(print_string) {
     .replace(/<LINE>/g, "<hr style='border:none;border-top:1px dashed #aaa;margin:8px 0'/>")
     .replace(/<DLINE>/g, "<hr style='border:none;border-top:2px solid #222;margin:10px 0'/>")
     .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
-    .replace(/<QR>.*?<\/QR>/g, "")
+    .replace(/<QR>.*?<\/QR>/g, "") // strip QR tag content
     .replace(/<BR>/g, "<br/>");
-  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}.card{max-width:420px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}.brand{font-weight:700;margin-bottom:4px}.meta{color:#6b7280;font-size:12px;margin-bottom:10px}@media print{body{padding:0}.card{box-shadow:none;border:none}}</style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Receipt</title><style>
+    body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}
+    .card{max-width:520px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+    .brand{font-weight:700;margin-bottom:4px}
+    .meta{color:#6b7280;font-size:12px;margin-bottom:10px}
+    @media print{body{padding:0}.card{box-shadow:none;border:none}}
+  </style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
+}
+
+// Pending receipt renderer (no print_string yet)
+function renderPendingReceiptHTML(p) {
+  const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
+  const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
+  const address = p?.address || null;
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Pending receipt</title><style>
+    body{font-family:-apple-system,Segoe UI,Roboto,Inter,Arial;padding:16px;background:#fff}
+    .card{max-width:520px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+    .brand{font-weight:700;margin-bottom:4px}
+    .badge{display:inline-block;background:#fde68a;color:#92400e;border-radius:8px;padding:2px 8px;font-size:12px;margin:6px 0}
+    .row{margin:6px 0}
+    .label{color:#6b7280}
+    @media print{body{padding:0}.card{box-shadow:none;border:none}}
+  </style></head><body><div class="card">
+    <div class="brand">${BRAND_NAME} Receipt</div>
+    <div class="badge">Pending — not yet confirmed on-chain</div>
+    <div class="row"><span class="label">Payment ID:</span> ${p?.payment_id || '-'}</div>
+    ${fiat ? `<div class="row"><span class="label">Fiat amount:</span> ${fiat}</div>` : ''}
+    ${crypto ? `<div class="row"><span class="label">Crypto amount:</span> ${crypto}</div>` : ''}
+    ${address ? `<div class="row"><span class="label">Address:</span> ${address}</div>` : ''}
+    <div class="row"><span class="label">Status:</span> ${p?.state || p?.status || 'created'}</div>
+    <p style="margin-top:10px;color:#374151">This is a provisional receipt. You’ll receive a final receipt once the payment is confirmed.</p>
+  </div></body></html>`;
 }
 
 function makeTransporter() {
@@ -112,7 +143,7 @@ function makeTransporter() {
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_PORT === 465,
-    requireTLS: SMTP_PORT === 587, // STARTTLS for 587
+    requireTLS: SMTP_PORT === 587,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
     tls: { minVersion: 'TLSv1.2' },
   });
@@ -123,6 +154,28 @@ async function sendReceiptEmail({ to, subject, html }) {
   return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
 }
 
+async function checkPaymentOnForumPay({ payment_id, currency, address }) {
+  const body = new URLSearchParams();
+  body.set('pos_id', POS_ID);
+  body.set('payment_id', payment_id);
+  body.set('currency', currency);
+  body.set('address', address);
+
+  const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
+    method: 'POST',
+    headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+
+  const text = await resp.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  console.log(`🔎 CheckPayment ${resp.status}: ${text}`);
+  if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
+  return json;
+}
+
+// Get/refresh print_string if possible
 async function ensurePrintString(payment) {
   let print_string = payment?.print_string || '';
   if (!print_string && payment?.address && payment?.currency) {
@@ -132,11 +185,34 @@ async function ensurePrintString(payment) {
         currency: payment.currency,
         address: payment.address,
       });
-      print_string = ck.print_string || '';
-      if (print_string) await store.update(payment.payment_id, { print_string });
-    } catch {}
+      // Persist any new details we discover
+      const update = {
+        status: ck.status || ck.state || payment.status,
+        state: ck.state || payment.state,
+        confirmed: ck.confirmed ? 1 : 0,
+        confirmed_time: ck.confirmed_time || payment.confirmed_time,
+        crypto_amount: ck.amount || ck.payment || ck.crypto_amount || payment.crypto_amount,
+        print_string: ck.print_string || '',
+        amount_exchange: ck.amount_exchange || payment.amount_exchange,
+        network_processing_fee: ck.network_processing_fee || payment.network_processing_fee,
+        last_transaction_time: ck.last_transaction_time || payment.last_transaction_time,
+        invoice_date: ck.invoice_date || payment.invoice_date,
+        payer_id: ck.payer_id || payment.payer_id,
+      };
+      await store.update(payment.payment_id, update);
+      print_string = update.print_string || '';
+    } catch {
+      // ignore — still pending
+    }
   }
   return print_string;
+}
+
+// Build the email HTML: final if possible; otherwise pending/provisional
+async function buildEmailHtml(payment) {
+  const printable = await ensurePrintString(payment);
+  if (printable) return renderReceiptHTML(printable);
+  return renderPendingReceiptHTML(payment);
 }
 
 // ---------- UI endpoints (what the React app calls) ----------
@@ -144,7 +220,7 @@ async function ensurePrintString(payment) {
 // Health
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// List recent payments (with error detail)
+// List recent payments
 app.get('/payments', async (_req, res) => {
   try {
     const rows = await store.listPayments();
@@ -155,7 +231,7 @@ app.get('/payments', async (_req, res) => {
   }
 });
 
-// Start payment (SANDBOX)
+// Start payment
 app.post('/start-payment', async (req, res) => {
   try {
     const {
@@ -181,10 +257,7 @@ app.post('/start-payment', async (req, res) => {
 
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
-      headers: {
-        Authorization: basicAuthHeader,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params,
     });
 
@@ -241,11 +314,11 @@ app.get('/receipt/:payment_id/print', async (req, res) => {
   const payment_id = req.params.payment_id;
   const p = await store.getPayment(payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
-  const print_string = await ensurePrintString(p);
-  res.type('html').send(renderReceiptHTML(print_string || ''));
+  const printable = await ensurePrintString(p);
+  res.type('html').send(renderReceiptHTML(printable || ''));
 });
 
-// Email receipt — Route A: /payments/:payment_id/email (existing)
+// Email receipt — Route A: /payments/:payment_id/email
 app.post('/payments/:payment_id/email', async (req, res) => {
   try {
     const payment_id = req.params.payment_id;
@@ -256,20 +329,20 @@ app.post('/payments/:payment_id/email', async (req, res) => {
     const p = await store.getPayment(payment_id);
     if (!p) return res.status(404).json({ error: 'Payment not found' });
 
-    const html = renderReceiptHTML(await ensurePrintString(p));
+    const html = await buildEmailHtml(p);
     const info = await sendReceiptEmail({
       to: recipient,
       subject: `${BRAND_NAME} receipt – ${payment_id}`,
       html,
     });
-    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null });
+    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null, provisional: !p.confirmed });
   } catch (e) {
     console.error('email error (/payments/:id/email):', e);
     res.status(500).json({ error: 'Failed to send email', detail: String(e) });
   }
 });
 
-// Email receipt — Route B: /email-receipts (compat with older UI: { payment_id, to_email })
+// Email receipt — Route B: /email-receipts (compat: { payment_id, to_email })
 app.post('/email-receipts', async (req, res) => {
   try {
     const { payment_id, to_email, email } = req.body || {};
@@ -279,13 +352,13 @@ app.post('/email-receipts', async (req, res) => {
     const p = await store.getPayment(payment_id);
     if (!p) return res.status(404).json({ error: 'Payment not found' });
 
-    const html = renderReceiptHTML(await ensurePrintString(p));
+    const html = await buildEmailHtml(p);
     const info = await sendReceiptEmail({
       to: recipient,
       subject: `${BRAND_NAME} receipt – ${payment_id}`,
       html,
     });
-    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null });
+    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null, provisional: !p.confirmed });
   } catch (e) {
     console.error('email error (/email-receipts):', e);
     res.status(500).json({ error: 'Failed to send email', detail: String(e) });
@@ -305,120 +378,15 @@ app.get('/report/daily.csv', async (req, res) => {
   res.type('text/csv').send(`date,count\n${date},${rows.length}\n`);
 });
 
-// ---------- CheckPayment helper + Webhook ----------
-async function checkPaymentOnForumPay({ payment_id, currency, address }) {
-  const body = new URLSearchParams();
-  body.set('pos_id', POS_ID);
-  body.set('payment_id', payment_id);
-  body.set('currency', currency);
-  body.set('address', address);
-
-  const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
-    method: 'POST',
-    headers: {
-      Authorization: basicAuthHeader,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-  });
-
-  const text = await resp.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  console.log(`🔎 CheckPayment ${resp.status}: ${text}`);
-  if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
-  return json;
-}
-
-app.post('/api/forumpay/callback', async (req, res) => {
-  try {
-    const token = req.query.token || '';
-    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-
-    const { payment_id, currency, address } = req.body || {};
-    if (!payment_id || !currency || !address) {
-      return res.status(400).json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
-    }
-
-    const ck = await checkPaymentOnForumPay({ payment_id, currency, address });
-
-    const update = {
-      status: ck.status || ck.state || null,
-      state: ck.state || null,
-      confirmed: ck.confirmed ? 1 : 0,
-      confirmed_time: ck.confirmed_time || null,
-      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
-      print_string: ck.print_string || null,
-      amount_exchange: ck.amount_exchange || null,
-      network_processing_fee: ck.network_processing_fee || null,
-      last_transaction_time: ck.last_transaction_time || null,
-      invoice_date: ck.invoice_date || null,
-      payer_id: ck.payer_id || null,
-    };
-    await store.update(payment_id, update);
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('callback error', e);
-    res.status(500).json({ error: 'Internal error', detail: e.message });
-  }
-});
-
-// Re-check a payment's status without exposing webhook token to the client
-app.post('/payments/:payment_id/recheck', async (req, res) => {
-  try {
-    const payment_id = req.params.payment_id;
-    const saved = await store.getPayment(payment_id);
-    if (!saved) return res.status(404).json({ error: 'Payment not found' });
-
-    const ck = await checkPaymentOnForumPay({
-      payment_id,
-      currency: saved.currency,
-      address: saved.address,
-    });
-
-    const update = {
-      status: ck.status || ck.state || null,
-      state: ck.state || null,
-      confirmed: ck.confirmed ? 1 : 0,
-      confirmed_time: ck.confirmed_time || null,
-      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
-      print_string: ck.print_string || null,
-      amount_exchange: ck.amount_exchange || null,
-      network_processing_fee: ck.network_processing_fee || null,
-      last_transaction_time: ck.last_transaction_time || null,
-      invoice_date: ck.invoice_date || null,
-      payer_id: ck.payer_id || null,
-    };
-    await store.update(payment_id, update);
-
-    res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
-  } catch (e) {
-    console.error('recheck error', e);
-    res.status(500).json({ error: 'recheck failed', detail: e.message });
-  }
-});
-
-// ---------- Your existing /api/* routes ----------
-const fpHeaders = () => ({
-  Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64'),
-});
+// ---------- Extra /api/* helpers ----------
+const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
 app.get('/api/health', async (_req, res) => {
   try {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
-    if (r.ok && parsed.kind === 'json') {
-      return res.json({ ok: true, status: r.status, data: parsed.data });
-    }
-    return res.status(r.status || 502).json({
-      ok: false,
-      status: r.status,
-      note: 'Prod Ping is unreliable; this hits GetSubAccounts.',
-      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
-    });
+    if (r.ok && parsed.kind === 'json') return res.json({ ok: true, status: r.status, data: parsed.data });
+    res.status(r.status || 502).json({ ok: false, status: r.status, note: 'Prod Ping is unreliable; this hits GetSubAccounts.', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -429,10 +397,7 @@ app.get('/api/subaccounts', async (_req, res) => {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({
-      error: 'GetSubAccounts failed',
-      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
-    });
+    res.status(r.status || 502).json({ error: 'GetSubAccounts failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
   } catch (e) {
     res.status(500).json({ error: 'GetSubAccounts error', details: String(e) });
   }
@@ -447,10 +412,7 @@ app.get('/api/subaccount', async (req, res) => {
     const r = await fetch(url, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({
-      error: 'GetSubAccount failed',
-      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
-    });
+    res.status(r.status || 502).json({ error: 'GetSubAccount failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
   } catch (e) {
     res.status(500).json({ error: 'GetSubAccount error', details: String(e) });
   }
