@@ -20,14 +20,14 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS (updated to include pos.savopay.co + preflight handler) ----------
+// ---------- CORS (includes pos.savopay.co + fixed preflight handler) ----------
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3002',
   'https://savopay-ui-1.onrender.com',
-  'https://pos.savopay.co',       // <-- NEW: production POS domain
+  'https://pos.savopay.co',       // production POS domain
   process.env.ALLOWED_ORIGIN,     // e.g. https://pos.savopay.co
-  process.env.UI_ORIGIN,          // also accept UI_ORIGIN env
+  process.env.UI_ORIGIN,          // accept UI_ORIGIN env
 ].filter(Boolean);
 
 app.use(
@@ -39,11 +39,12 @@ app.use(
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 204,
   })
 );
 
-// Ensure all preflights receive proper CORS response
-app.options('*', cors());
+// IMPORTANT: Express 5 + path-to-regexp v6 needs a regex or '(.*)' here (NOT '*')
+app.options(/.*/, cors());
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
