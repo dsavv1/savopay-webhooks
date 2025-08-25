@@ -56,7 +56,8 @@ async function init() {
     `ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_date TEXT`,
     `ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount TEXT`,
     `ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_currency TEXT`,
-    `ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_amount TEXT`
+    `ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_amount TEXT`,
+    `ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`
   ];
   for (const sql of addCols) await pool.query(sql);
 
@@ -73,8 +74,55 @@ async function init() {
     END $$;
   `);
 
-  await pool.query(`CREATE INDEX IF NOT EXISTS payments_created_at_idx ON payments (created_at DESC)`);
+  const fixTypes = `
+    DO $$
+    BEGIN
+      -- created_at → timestamptz
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='payments' AND column_name='created_at' AND data_type <> 'timestamp with time zone'
+      ) THEN
+        BEGIN
+          ALTER TABLE payments
+            ALTER COLUMN created_at TYPE timestamptz
+            USING (created_at::timestamptz);
+        EXCEPTION WHEN others THEN
+          UPDATE payments
+            SET created_at = now()
+            WHERE created_at IS NULL OR created_at::text = '' OR created_at ~ '[^0-9T:\\-\\.: ]';
+          ALTER TABLE payments
+            ALTER COLUMN created_at TYPE timestamptz
+            USING (created_at::timestamptz);
+        END;
+      END IF;
+
+      -- updated_at → timestamptz
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='payments' AND column_name='updated_at' AND data_type <> 'timestamp with time zone'
+      ) THEN
+        BEGIN
+          ALTER TABLE payments
+            ALTER COLUMN updated_at TYPE timestamptz
+            USING (updated_at::timestamptz);
+        EXCEPTION WHEN others THEN
+          UPDATE payments
+            SET updated_at = now()
+            WHERE updated_at IS NULL OR updated_at::text = '' OR updated_at ~ '[^0-9T:\\-\\.: ]';
+          ALTER TABLE payments
+            ALTER COLUMN updated_at TYPE timestamptz
+            USING (updated_at::timestamptz);
+        END;
+      END IF;
+
+      ALTER TABLE payments ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE payments ALTER COLUMN updated_at SET DEFAULT now();
+    END $$;
+  `;
+  await pool.query(fixTypes);
+
   await pool.query(`CREATE INDEX IF NOT EXISTS payments_state_idx ON payments (state)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS payments_created_at_idx ON payments (created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS payments_pending_idx ON payments (created_at) WHERE state = 'created'`);
 }
 
@@ -125,13 +173,15 @@ async function saveStart(data) {
   ];
   const d = pick(data, allowed);
 
+  if (!d.created_at) d.created_at = new Date().toISOString();
+
   const cols = Object.keys(d);
   const vals = Object.values(d);
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
 
   const updates = cols
     .filter(c => c !== 'payment_id')
-    .map((c, i) => `${c} = EXCLUDED.${c}`)
+    .map(c => `${c} = EXCLUDED.${c}`)
     .join(', ');
 
   await pool.query(
@@ -151,16 +201,14 @@ async function update(payment_id, fields) {
     'invoice_amount','invoice_currency','crypto_amount',
     'status','state','confirmed','confirmed_time','payer_id',
     'customer_email','print_string','created_at','amount_exchange',
-    'network_processing_fee','last_transaction_time','invoice_date','raw_json','updated_at'
+    'network_processing_fee','last_transaction_time','invoice_date','raw_json'
   ];
   const d = pick(fields, allowed);
-  d.updated_at = new Date().toISOString();
-
   if (Object.keys(d).length === 0) return;
 
   const { clause, values } = buildUpdateSet(d, 2);
   await pool.query(
-    `UPDATE payments SET ${clause} WHERE payment_id = $1`,
+    `UPDATE payments SET ${clause}${clause ? ',' : ''} updated_at = now() WHERE payment_id = $1`,
     [payment_id, ...values]
   );
 }
@@ -171,7 +219,7 @@ async function listPendingOlderThan(minAgeSec = 60, limit = 25) {
     SELECT payment_id, currency, address, state, created_at
     FROM payments
     WHERE state = 'created'
-      AND (now() - created_at) > make_interval(secs => $1::int)
+      AND (now() - COALESCE(created_at, updated_at)) > make_interval(secs => $1::int)
     ORDER BY created_at DESC
     LIMIT $2
     `,
