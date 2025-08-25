@@ -1,4 +1,4 @@
-// index.js — SavoPay backend (savopay-webhooks) with prod-only CORS allowlist
+// index.js — SavoPay backend (savopay-webhooks) with prod-only CORS + admin-protected endpoints
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -20,10 +20,8 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static demo pages (optional)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- CORS (Lock to prod only; dev still allows localhost) ----------
+// ---------- CORS (Lock to prod only; dev allows localhost) ----------
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
-
-// In prod: only your POS origin. In dev: POS + localhost.
 const allowedOrigins = (isProd
   ? [
       'https://pos.savopay.co',
@@ -40,16 +38,15 @@ const allowedOrigins = (isProd
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // allow curl/health/no-origin
+      if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false); // disallowed -> no CORS headers
+      return cb(null, false);
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     optionsSuccessStatus: 204,
   })
 );
-// IMPORTANT (Express 5): use a RegExp instead of '*'
 app.options(/.*/, cors());
 
 // ---------- ENV ----------
@@ -60,7 +57,7 @@ const FP_BASE  = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.co
 const FP_USER  = process.env.FORUMPAY_USER || '';
 const FP_PASS  = process.env.FORUMPAY_PASS || '';
 
-// ForumPay payment API (sandbox or prod depending on env)
+// ForumPay payment API
 const PAY_BASE   = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
 const PAY_USER   = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
@@ -70,7 +67,7 @@ const POS_ID     = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 const CALLBACK_URL  = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
-// SMTP (supports both SMTP_* and EMAIL_* env names)
+// SMTP
 const SMTP_HOST  = process.env.SMTP_HOST  || process.env.EMAIL_HOST  || 'smtp.office365.com';
 const SMTP_PORT  = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
 const SMTP_USER  = process.env.SMTP_USER  || process.env.EMAIL_USER  || '';
@@ -79,6 +76,23 @@ const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM  || SMTP_USE
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
+
+// ---------- Admin auth middleware ----------
+function requireAdmin(req, res, next) {
+  try {
+    const hdr = req.headers.authorization || '';
+    if (!hdr.startsWith('Basic ')) {
+      return res.status(401).set('WWW-Authenticate', 'Basic').json({ error: 'auth required' });
+    }
+    const [user, pass] = Buffer.from(hdr.slice(6), 'base64').toString().split(':');
+    if (user === (process.env.ADMIN_USER || '') && pass === (process.env.ADMIN_PASS || '')) {
+      return next();
+    }
+    return res.status(403).json({ error: 'forbidden' });
+  } catch {
+    return res.status(401).set('WWW-Authenticate', 'Basic').json({ error: 'auth required' });
+  }
+}
 
 // ---------- Helpers ----------
 function nowIso() {
@@ -91,7 +105,6 @@ async function parseMaybeJson(res) {
   catch { return { kind: 'html', data: text }; }
 }
 
-// Render ForumPay print_string HTML
 function renderReceiptHTML(print_string) {
   let html = print_string || "";
   html = html
@@ -117,7 +130,6 @@ function renderReceiptHTML(print_string) {
   </style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
 }
 
-// Pending/provisional HTML when not yet confirmed
 function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
@@ -207,9 +219,7 @@ async function ensurePrintString(payment) {
       };
       await store.update(payment.payment_id, update);
       print_string = update.print_string || '';
-    } catch {
-      // still pending
-    }
+    } catch {}
   }
   return print_string;
 }
@@ -220,12 +230,9 @@ async function buildEmailHtml(payment) {
   return renderPendingReceiptHTML(payment);
 }
 
-// ---------- UI endpoints (called by the React app) ----------
-
-// Health
+// ---------- UI endpoints ----------
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// List recent payments
 app.get('/payments', async (_req, res) => {
   try {
     const rows = await store.listPayments();
@@ -236,7 +243,6 @@ app.get('/payments', async (_req, res) => {
   }
 });
 
-// Start payment
 app.post('/start-payment', async (req, res) => {
   try {
     const {
@@ -305,7 +311,6 @@ app.post('/start-payment', async (req, res) => {
   }
 });
 
-// JSON receipt
 app.get('/receipt/:payment_id', async (req, res) => {
   const payment_id = req.params.payment_id;
   const p = await store.getPayment(payment_id);
@@ -314,7 +319,6 @@ app.get('/receipt/:payment_id', async (req, res) => {
   res.json({ payment_id, print_string });
 });
 
-// Printable HTML receipt
 app.get('/receipt/:payment_id/print', async (req, res) => {
   const payment_id = req.params.payment_id;
   const p = await store.getPayment(payment_id);
@@ -324,11 +328,11 @@ app.get('/receipt/:payment_id/print', async (req, res) => {
   return res.type('html').send(renderPendingReceiptHTML(p));
 });
 
-// Email receipt — Route A: /payments/:payment_id/email
+// POS-facing email route stays public
 app.post('/payments/:payment_id/email', async (req, res) => {
   try {
     const payment_id = req.params.payment_id;
-    const { to_email, email } = req.body || {}; // accept either key
+    const { to_email, email } = req.body || {};
     const recipient = to_email || email;
     if (!recipient) return res.status(400).json({ error: 'to_email is required' });
 
@@ -348,8 +352,8 @@ app.post('/payments/:payment_id/email', async (req, res) => {
   }
 });
 
-// Email receipt — Route B: /email-receipts (compat: { payment_id, to_email })
-app.post('/email-receipts', async (req, res) => {
+// Admin-protected routes
+app.post('/email-receipts', requireAdmin, async (req, res) => {
   try {
     const { payment_id, to_email, email } = req.body || {};
     const recipient = to_email || email;
@@ -371,14 +375,13 @@ app.post('/email-receipts', async (req, res) => {
   }
 });
 
-// Daily report stubs
-app.get('/report/daily', async (req, res) => {
+app.get('/report/daily', requireAdmin, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const rows = await store.listPayments();
   res.json({ date, summary: { totalCount: rows.length }, rows });
 });
 
-app.get('/report/daily.csv', async (req, res) => {
+app.get('/report/daily.csv', requireAdmin, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const rows = await store.listPayments();
   res.type('text/csv').send(`date,count\n${date},${rows.length}\n`);
@@ -421,7 +424,6 @@ app.post('/api/forumpay/callback', async (req, res) => {
   }
 });
 
-// Manual/forced re-check
 app.post('/payments/:payment_id/recheck', async (req, res) => {
   try {
     const payment_id = req.params.payment_id;
