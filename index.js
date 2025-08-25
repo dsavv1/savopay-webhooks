@@ -14,16 +14,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Security headers
+// Security headers (Helmet)
 app.use(
   helmet({
     hsts: { maxAge: 15552000, includeSubDomains: true, preload: false },
     frameguard: { action: 'deny' },
+    crossOriginOpenerPolicy: { policy: 'same-origin' },
+    crossOriginResourcePolicy: { policy: 'same-site' },
+    referrerPolicy: { policy: 'no-referrer' },
   })
 );
 
@@ -490,7 +494,7 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
     res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
   } catch (e) {
     console.error('recheck error', e);
-    res.status(500).json({ error: 'recheck failed', detail: e.message });
+    res.status(500).json({ error: 'recheck failed', detail: String(e) });
   }
 });
 
