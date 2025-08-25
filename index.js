@@ -20,7 +20,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Security headers
+// Base security headers
 app.use(
   helmet({
     hsts: { maxAge: 15552000, includeSubDomains: true, preload: false },
@@ -28,6 +28,24 @@ app.use(
     crossOriginOpenerPolicy: { policy: 'same-origin' },
     crossOriginResourcePolicy: { policy: 'same-site' },
     referrerPolicy: { policy: 'no-referrer' },
+  })
+);
+
+// Tight CSP for API responses (receipt HTML still works)
+app.use(
+  helmet.contentSecurityPolicy({
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "img-src": ["'self'", "data:", "https://api.forumpay.com", "https://widget.forumpay.com"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "connect-src": ["'self'", "https://api.savopay.co", "https://widget.forumpay.com"],
+      "frame-src": ["'self'", "https://widget.forumpay.com"],
+      "script-src": ["'self'"], // API doesn’t serve scripts; keep strict
+      "object-src": ["'none'"],
+      "base-uri": ["'self'"],
+      "form-action": ["'self'"]
+    },
   })
 );
 
@@ -51,7 +69,6 @@ app.use(
     optionsSuccessStatus: 204,
   })
 );
-// Express v5-safe preflight handler
 app.options(/.*/, cors());
 
 // Rate limit for start-payment
@@ -64,23 +81,18 @@ const startPaymentLimiter = rateLimit({
 
 // ENV
 const PORT = process.env.PORT || 3000;
-
-// ForumPay dashboard info (optional)
 const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
 const FP_USER = process.env.FORUMPAY_USER || '';
 const FP_PASS = process.env.FORUMPAY_PASS || '';
 
-// ForumPay payment API
 const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
 const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
 const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 
-// Webhook
 const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
-// SMTP
 const SMTP_HOST = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.office365.com';
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
 const SMTP_USER = process.env.SMTP_USER || process.env.EMAIL_USER || '';
@@ -88,14 +100,13 @@ const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
 const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER || 'receipts@savopay.local';
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
 
-// Auto-recheck
 const CRON_RECHECK_MS = parseInt(process.env.CRON_RECHECK_MS || '60000', 10);
 const PENDING_MIN_AGE_SEC = parseInt(process.env.PENDING_MIN_AGE_SEC || '60', 10);
 const DISABLE_AUTO_RECHECK = (process.env.DISABLE_AUTO_RECHECK || '').toLowerCase() === 'true';
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
 
-// Admin auth middleware
+// Admin auth
 function requireAdmin(req, res, next) {
   try {
     const hdr = req.headers.authorization || '';
@@ -114,16 +125,11 @@ function requireAdmin(req, res, next) {
 function nowIso() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
-
 async function parseMaybeJson(res) {
   const text = await res.text();
-  try {
-    return { kind: 'json', data: JSON.parse(text) };
-  } catch {
-    return { kind: 'html', data: text };
-  }
+  try { return { kind: 'json', data: JSON.parse(text) }; }
+  catch { return { kind: 'html', data: text }; }
 }
-
 function renderReceiptHTML(print_string) {
   let html = print_string || '';
   html = html
@@ -148,7 +154,6 @@ function renderReceiptHTML(print_string) {
     @media print{body{padding:0}.card{box-shadow:none;border:none}}
   </style></head><body><div class="card"><div class="brand">${BRAND_NAME} Receipt</div><div class="meta">Printed at ${new Date().toLocaleString()}</div><div>${html}</div></div></body></html>`;
 }
-
 function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
@@ -172,7 +177,6 @@ function renderPendingReceiptHTML(p) {
     <p style="margin-top:10px;color:#374151">This is a provisional receipt. You’ll receive a final receipt once the payment is confirmed.</p>
   </div></body></html>`;
 }
-
 function makeTransporter() {
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) throw new Error('SMTP not configured');
   return nodemailer.createTransport({
@@ -184,32 +188,27 @@ function makeTransporter() {
     tls: { minVersion: 'TLSv1.2' },
   });
 }
-
 async function sendReceiptEmail({ to, subject, html }) {
   const tx = makeTransporter();
   return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
 }
-
 async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   const body = new URLSearchParams();
   body.set('pos_id', POS_ID);
   body.set('payment_id', payment_id);
   body.set('currency', currency);
   body.set('address', address);
-
   const resp = await fetch(`${PAY_BASE}/pay/v2/CheckPayment/`, {
     method: 'POST',
     headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
-
   const text = await resp.text();
   let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
   console.log(`🔎 CheckPayment ${resp.status}: ${text}`);
   if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
   return json;
 }
-
 async function ensurePrintString(payment) {
   let print_string = payment?.print_string || '';
   if (!print_string && payment?.address && payment?.currency) {
@@ -238,41 +237,25 @@ async function ensurePrintString(payment) {
   }
   return print_string;
 }
-
 async function buildEmailHtml(payment) {
   const printable = await ensurePrintString(payment);
   return printable ? renderReceiptHTML(printable) : renderPendingReceiptHTML(payment);
 }
-
-// ForumPay info (optional) — single definition
 const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
 // UI endpoints
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.get('/payments', async (_req, res) => {
-  try {
-    const rows = await store.listPayments();
-    res.json(rows);
-  } catch (e) {
-    console.error('payments error:', e);
-    res.status(500).json({ error: 'payments failed', detail: e.message });
-  }
+  try { res.json(await store.listPayments()); }
+  catch (e) { console.error('payments error:', e); res.status(500).json({ error: 'payments failed', detail: e.message }); }
 });
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const {
-      invoice_amount = '100.00',
-      invoice_currency = 'USD',
-      currency = 'USDT',
-      payer_id = 'walk-in',
-      customer_email = '',
-    } = req.body || {};
-
+    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='' } = req.body || {};
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
-
     const params = new URLSearchParams();
     params.set('pos_id', POS_ID);
     params.set('invoice_amount', String(invoice_amount));
@@ -282,45 +265,31 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
-
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
       headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params,
     });
-
     const text = await resp.text();
     let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
     console.log(`StartPayment ${resp.status}: ${text}`);
-
-    if (!resp.ok) {
-      return res.status(resp.status).json({ error: 'StartPayment failed', detail: data });
-    }
-
+    if (!resp.ok) return res.status(resp.status).json({ error: 'StartPayment failed', detail: data });
     await store.saveStart({
       payment_id: data.payment_id || null,
-      order_id,
-      pos_id: POS_ID,
+      order_id, pos_id: POS_ID,
       address: data.address || null,
-      currency,
-      invoice_amount,
-      invoice_currency,
+      currency, invoice_amount, invoice_currency,
       crypto_amount: data.amount || null,
-      status: 'Created',
-      state: 'created',
-      confirmed: 0,
-      confirmed_time: null,
+      status: 'Created', state: 'created', confirmed: 0, confirmed_time: null,
       payer_id: String(payer_id || 'walk-in'),
       customer_email: customer_email || null,
       print_string: data.print_string || null,
       created_at: nowIso(),
       amount_exchange: data.amount_exchange || null,
       network_processing_fee: data.network_processing_fee || null,
-      last_transaction_time: null,
-      invoice_date: null,
+      last_transaction_time: null, invoice_date: null,
       amount: data.amount || null,
     });
-
     return res.json(data);
   } catch (e) {
     console.error('start-payment error', e);
@@ -329,69 +298,36 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
 });
 
 app.get('/receipt/:payment_id', async (req, res) => {
-  const payment_id = req.params.payment_id;
-  const p = await store.getPayment(payment_id);
+  const p = await store.getPayment(req.params.payment_id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const print_string = await ensurePrintString(p);
-  res.json({ payment_id, print_string });
+  res.json({ payment_id: p.payment_id, print_string });
 });
 
 app.get('/receipt/:payment_id/print', async (req, res) => {
-  const payment_id = req.params.payment_id;
-  const p = await store.getPayment(payment_id);
+  const p = await store.getPayment(req.params.payment_id);
   if (!p) return res.status(404).type('text/plain').send('Not found');
   const printable = await ensurePrintString(p);
   res.type('html').send(printable ? renderReceiptHTML(printable) : renderPendingReceiptHTML(p));
 });
 
-// POS-facing email route (open)
 app.post('/payments/:payment_id/email', async (req, res) => {
   try {
-    const payment_id = req.params.payment_id;
     const { to_email, email } = req.body || {};
     const recipient = to_email || email;
     if (!recipient) return res.status(400).json({ error: 'to_email is required' });
-
-    const p = await store.getPayment(payment_id);
+    const p = await store.getPayment(req.params.payment_id);
     if (!p) return res.status(404).json({ error: 'Payment not found' });
-
     const html = await buildEmailHtml(p);
-    const info = await sendReceiptEmail({
-      to: recipient,
-      subject: `${BRAND_NAME} receipt – ${payment_id}`,
-      html,
-    });
-
-    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null, provisional: !p.confirmed });
+    const info = await sendReceiptEmail({ to: recipient, subject: `${BRAND_NAME} receipt – ${p.payment_id}`, html });
+    res.json({ ok: true, payment_id: p.payment_id, to: recipient, id: info.messageId || null, provisional: !p.confirmed });
   } catch (e) {
     console.error('email error (/payments/:id/email):', e);
     res.status(500).json({ error: 'Failed to send email', detail: String(e) });
   }
 });
 
-// Admin-protected routes
-app.post('/email-receipts', requireAdmin, async (req, res) => {
-  try {
-    const { payment_id, to_email, email } = req.body || {};
-    const recipient = to_email || email;
-    if (!payment_id || !recipient) return res.status(400).json({ error: 'payment_id and to_email required' });
-
-    const p = await store.getPayment(payment_id);
-    if (!p) return res.status(404).json({ error: 'Payment not found' });
-
-    const html = await buildEmailHtml(p);
-    const info = await sendReceiptEmail({
-      to: recipient,
-      subject: `${BRAND_NAME} receipt – ${payment_id}`,
-      html,
-    });
-    res.json({ ok: true, payment_id, to: recipient, id: info.messageId || null, provisional: !p.confirmed });
-  } catch (e) {
-    console.error('email error (/email-receipts):', e);
-    res.status(500).json({ error: 'Failed to send email', detail: String(e) });
-  }
-});
-
+// Admin reports
 app.get('/report/daily', requireAdmin, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const q = `
@@ -421,53 +357,34 @@ app.get('/report/daily.csv', requireAdmin, async (req, res) => {
   res.type('text/csv').send(`date,confirmed,total\n${date},${confirmed},${total}\n`);
 });
 
-// Webhook + Recheck
-app.post('/api/forumpay/callback', async (req, res) => {
-  try {
-    const token = req.query.token || '';
-    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-
-    const { payment_id, currency, address } = req.body || {};
-    if (!payment_id || !currency || !address) {
-      return res.status(400).json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
-    }
-
-    const ck = await checkPaymentOnForumPay({ payment_id, currency, address });
-
-    const update = {
-      status: ck.status || ck.state || null,
-      state: ck.state || null,
-      confirmed: ck.confirmed ? 1 : 0,
-      confirmed_time: ck.confirmed_time || null,
-      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
-      print_string: ck.print_string || null,
-      amount_exchange: ck.amount_exchange || null,
-      network_processing_fee: ck.network_processing_fee || null,
-      last_transaction_time: ck.last_transaction_time || null,
-      invoice_date: ck.invoice_date || null,
-      payer_id: ck.payer_id || null,
-    };
-    await store.update(payment_id, update);
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('callback error', e);
-    res.status(500).json({ error: 'Internal error', detail: e.message });
-  }
+// Webhook audit: list recent events
+app.get('/admin/webhook-events', requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+  const events = await store.listWebhookEvents(limit);
+  res.json({ events });
 });
 
-app.post('/payments/:payment_id/recheck', async (req, res) => {
-  try {
-    const payment_id = req.params.payment_id;
-    const saved = await store.getPayment(payment_id);
-    if (!saved) return res.status(404).json({ error: 'Payment not found' });
+// Webhook + logging
+app.post('/api/forumpay/callback', async (req, res) => {
+  const token = req.query.token || '';
+  const body = req.body || {};
+  const payment_id = body.payment_id || null;
 
+  if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+    await store.logWebhookEvent({ payment_id, status: 'invalid_token', error: 'Invalid token', payload: body });
+    return res.status(403).json({ error: 'Invalid token' });
+  }
+
+  if (!body.payment_id || !body.currency || !body.address) {
+    await store.logWebhookEvent({ payment_id, status: 'bad_request', error: 'Missing fields', payload: body });
+    return res.status(400).json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
+  }
+
+  try {
     const ck = await checkPaymentOnForumPay({
-      payment_id,
-      currency: saved.currency,
-      address: saved.address,
+      payment_id: body.payment_id,
+      currency: body.currency,
+      address: body.address,
     });
 
     const update = {
@@ -483,16 +400,46 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
       invoice_date: ck.invoice_date || null,
       payer_id: ck.payer_id || null,
     };
-    await store.update(payment_id, update);
+    await store.update(body.payment_id, update);
 
-    res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
+    await store.logWebhookEvent({ payment_id, status: 'updated', payload: body, error: null });
+    res.json({ ok: true });
   } catch (e) {
-    console.error('recheck error', e);
-    res.status(500).json({ error: 'recheck failed', detail: String(e) });
+    await store.logWebhookEvent({ payment_id, status: 'error', error: String(e), payload: body });
+    console.error('callback error', e);
+    res.status(500).json({ error: 'Internal error', detail: e.message });
   }
 });
 
-// Admin endpoint to trigger recheck cycle manually
+// Manual recheck
+app.post('/payments/:payment_id/recheck', async (req, res) => {
+  try {
+    const payment_id = req.params.payment_id;
+    const saved = await store.getPayment(payment_id);
+    if (!saved) return res.status(404).json({ error: 'Payment not found' });
+    const ck = await checkPaymentOnForumPay({ payment_id, currency: saved.currency, address: saved.address });
+    const update = {
+      status: ck.status || ck.state || null,
+      state: ck.state || null,
+      confirmed: ck.confirmed ? 1 : 0,
+      confirmed_time: ck.confirmed_time || null,
+      crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
+      print_string: ck.print_string || null,
+      amount_exchange: ck.amount_exchange || null,
+      network_processing_fee: ck.network_processing_fee || null,
+      last_transaction_time: ck.last_transaction_time || null,
+      invoice_date: ck.invoice_date || null,
+      payer_id: ck.payer_id || null,
+    };
+    await store.update(payment_id, update);
+    res.json({ ok: true, state: update.state, confirmed: update.confirmed, crypto_amount: update.crypto_amount });
+  } catch (e) {
+    console.error('recheck error', e);
+    res.status(500).json({ error: 'recheck failed', detail: e.message });
+  }
+});
+
+// Optional admin trigger to recheck older pendings (kept)
 app.post('/admin/recheck-pending', requireAdmin, async (_req, res) => {
   try {
     const pendings = await store.listPendingOlderThan(PENDING_MIN_AGE_SEC, 25);
@@ -531,14 +478,11 @@ app.get('/api/health', async (_req, res) => {
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json({ ok: true, status: r.status, data: parsed.data });
     res.status(r.status || 502).json({
-      ok: false,
-      status: r.status,
+      ok: false, status: r.status,
       note: 'Prod Ping is unreliable; this hits GetSubAccounts.',
       preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
 app.get('/api/subaccounts', async (_req, res) => {
@@ -546,13 +490,8 @@ app.get('/api/subaccounts', async (_req, res) => {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({
-      error: 'GetSubAccounts failed',
-      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
-    });
-  } catch (e) {
-    res.status(500).json({ error: 'GetSubAccounts error', details: String(e) });
-  }
+    res.status(r.status || 502).json({ error: 'GetSubAccounts failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
+  } catch (e) { res.status(500).json({ error: 'GetSubAccounts error', details: String(e) }); }
 });
 
 app.get('/api/subaccount', async (req, res) => {
@@ -564,13 +503,8 @@ app.get('/api/subaccount', async (req, res) => {
     const r = await fetch(url, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
-    res.status(r.status || 502).json({
-      error: 'GetSubAccount failed',
-      preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data,
-    });
-  } catch (e) {
-    res.status(500).json({ error: 'GetSubAccount error', details: String(e) });
-  }
+    res.status(r.status || 502).json({ error: 'GetSubAccount failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
+  } catch (e) { res.status(500).json({ error: 'GetSubAccount error', details: String(e) }); }
 });
 
 // Root
