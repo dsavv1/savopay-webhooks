@@ -109,9 +109,12 @@ const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER
 
 // Branding
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
-const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || '/logo.png';
+const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || ''; // leave empty; we handle defaults below
 const BRAND_ADDRESS = process.env.BRAND_ADDRESS || '';
 const BRAND_SUPPORT_EMAIL = process.env.BRAND_SUPPORT_EMAIL || '';
+
+// Built-in embedded fallback logo (small, optimized)
+const BRAND_LOGO_EMBED = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAARAAAAAwCAYAAABcQd4SAAABlUlEQVR4nO3cQY7CMBQF0c8m1v9LwVvW7h0wSYo6W6w6mS5w0m3x2Y0l9E6x0Zs2Yz2VgR7kLxg7k0Yx+7JQ7k9qgD8Y0aXg7i8N6bq6f5LwzCwAAAAAAAAAAAAAAAAAAAAAAAD4k0R3p9l5z4m1c7G+3h1q0q0M0H1k6f3c7S1b1+u+6dRk5wbrp3m8y3u3g2Xr9Y6m7q1IV9Xw2t8F8m4l5v8mV6g1G2bQb5GvQp9Q5o0h8lq8yq8b2mLw6cXy1q8bQk2b8S1Vqv8W3m3j6t8b6a9m8mXU6b5IY9Y0b6WgI1i0c3b4vL6m9vQm8oV1uW3qk5L7WgN1u0a3b4tL6n9tQm8oV1uW3qk5L7WgP1r0Y0Z+b/0mEw9t1bqgVbJ8n7mB1JrnHcVxZz0f9y4xv5n4HkI7z8Y8oW+e3jU0e7p8eQmV4mS9F0b0Yb0b0Yb0b0Yb0b0Yb0b8Tj2f1bA6f4z3fXx6c8g3kQAAAAAAAAAAAAAAAAAAAAAAAB/wN7dKcH6g9bqAAAAAElFTkSuQmCC';
 
 // Ops
 const CRON_RECHECK_MS = parseInt(process.env.CRON_RECHECK_MS || '60000', 10);
@@ -144,18 +147,33 @@ async function parseMaybeJson(res) {
   try { return { kind: 'json', data: JSON.parse(text) }; }
   catch { return { kind: 'html', data: text }; }
 }
+
+// Resolve the logo source with multiple fallbacks:
+// 1) If BRAND_LOGO_PATH is a data: URL or http(s), use it.
+// 2) If BRAND_LOGO_PATH points to a file under /public, embed it as data URL.
+// 3) If /public/logo.png exists, embed it.
+// 4) Else use the built-in BRAND_LOGO_EMBED.
 function getLogoSrc() {
-  const p = (BRAND_LOGO_PATH || '').trim();
-  if (!p) return '';
-  if (p.startsWith('data:') || p.startsWith('http')) return p;
+  const envVal = (BRAND_LOGO_PATH || '').trim();
+  if (envVal) {
+    if (envVal.startsWith('data:') || envVal.startsWith('http')) return envVal;
+    try {
+      const abs = path.join(__dirname, 'public', envVal.replace(/^\//, ''));
+      if (fs.existsSync(abs)) {
+        const b64 = fs.readFileSync(abs).toString('base64');
+        const mime = abs.toLowerCase().endsWith('.jpg') || abs.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png';
+        return `data:${mime};base64,${b64}`;
+      }
+    } catch {}
+  }
   try {
-    const abs = path.join(__dirname, 'public', p.replace(/^\//, ''));
+    const abs = path.join(__dirname, 'public', 'logo.png');
     if (fs.existsSync(abs)) {
       const b64 = fs.readFileSync(abs).toString('base64');
       return `data:image/png;base64,${b64}`;
     }
   } catch {}
-  return p;
+  return BRAND_LOGO_EMBED || '';
 }
 
 function renderReceiptHTML(print_string) {
