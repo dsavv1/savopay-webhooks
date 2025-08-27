@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { store } from './store.js';
 import nodemailer from 'nodemailer';
@@ -108,7 +109,7 @@ const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER
 
 // Branding
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
-const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || '/logo.png'; // file served from /public/logo.png
+const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || '/logo.png';
 const BRAND_ADDRESS = process.env.BRAND_ADDRESS || '';
 const BRAND_SUPPORT_EMAIL = process.env.BRAND_SUPPORT_EMAIL || '';
 
@@ -143,6 +144,19 @@ async function parseMaybeJson(res) {
   try { return { kind: 'json', data: JSON.parse(text) }; }
   catch { return { kind: 'html', data: text }; }
 }
+function getLogoSrc() {
+  const p = (BRAND_LOGO_PATH || '').trim();
+  if (!p) return '';
+  if (p.startsWith('data:') || p.startsWith('http')) return p;
+  try {
+    const abs = path.join(__dirname, 'public', p.replace(/^\//, ''));
+    if (fs.existsSync(abs)) {
+      const b64 = fs.readFileSync(abs).toString('base64');
+      return `data:image/png;base64,${b64}`;
+    }
+  } catch {}
+  return p;
+}
 
 function renderReceiptHTML(print_string) {
   let html = print_string || '';
@@ -168,6 +182,8 @@ function renderReceiptHTML(print_string) {
        </div>`
     : '';
 
+  const logoSrc = getLogoSrc();
+
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Receipt</title>
   <style>
@@ -181,7 +197,7 @@ function renderReceiptHTML(print_string) {
   <body>
     <div class="card">
       <div class="brand">
-        ${BRAND_LOGO_PATH ? `<img src="${BRAND_LOGO_PATH}" alt="logo" onerror="this.style.display='none';">` : ``}
+        ${logoSrc ? `<img src="${logoSrc}" alt="logo" onerror="this.style.display='none';">` : ``}
         <span>${BRAND_NAME} Receipt</span>
       </div>
       <div class="meta">Printed at ${new Date().toLocaleString()}</div>
@@ -203,6 +219,8 @@ function renderPendingReceiptHTML(p) {
        </div>`
     : '';
 
+  const logoSrc = getLogoSrc();
+
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Pending receipt</title>
   <style>
@@ -218,7 +236,7 @@ function renderPendingReceiptHTML(p) {
   <body>
     <div class="card">
       <div class="brand">
-        ${BRAND_LOGO_PATH ? `<img src="${BRAND_LOGO_PATH}" alt="logo" onerror="this.style.display='none';">` : ``}
+        ${logoSrc ? `<img src="${logoSrc}" alt="logo" onerror="this.style.display='none';">` : ``}
         <span>${BRAND_NAME} Receipt</span>
       </div>
       <div class="badge">Pending — not yet confirmed on-chain</div>
