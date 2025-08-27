@@ -41,7 +41,7 @@ app.use(
       "style-src": ["'self'", "'unsafe-inline'"],
       "connect-src": ["'self'", "https://api.savopay.co", "https://widget.forumpay.com"],
       "frame-src": ["'self'", "https://widget.forumpay.com"],
-      "script-src": ["'self'"], // API doesn’t serve scripts; keep strict
+      "script-src": ["'self'"],
       "object-src": ["'none'"],
       "base-uri": ["'self'"],
       "form-action": ["'self'"]
@@ -355,6 +355,58 @@ app.get('/report/daily.csv', requireAdmin, async (req, res) => {
   const confirmed = rows[0]?.confirmed_count ?? 0;
   const total = rows[0]?.total_count ?? 0;
   res.type('text/csv').send(`date,confirmed,total\n${date},${confirmed},${total}\n`);
+});
+
+// NEW: Range reports (JSON)
+app.get('/report/range', requireAdmin, async (req, res) => {
+  const { from, to } = req.query;
+  if (!from || !to) {
+    return res.status(400).json({ error: 'from and to (YYYY-MM-DD) required' });
+  }
+  try {
+    const q = `
+      SELECT payment_id, invoice_amount, invoice_currency, state, status, created_at
+      FROM payments
+      WHERE (created_at AT TIME ZONE 'UTC')::date >= $1::date
+        AND (created_at AT TIME ZONE 'UTC')::date <= $2::date
+      ORDER BY created_at DESC
+    `;
+    const { rows } = await store._pool.query(q, [from, to]);
+    res.json({ from, to, count: rows.length, rows });
+  } catch (err) {
+    console.error('report range error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+// NEW: Range reports (CSV)
+app.get('/report/range.csv', requireAdmin, async (req, res) => {
+  const { from, to } = req.query;
+  if (!from || !to) {
+    return res.status(400).type('text/plain').send('from and to (YYYY-MM-DD) required');
+  }
+  try {
+    const q = `
+      SELECT payment_id, invoice_amount, invoice_currency, state, status, created_at
+      FROM payments
+      WHERE (created_at AT TIME ZONE 'UTC')::date >= $1::date
+        AND (created_at AT TIME ZONE 'UTC')::date <= $2::date
+      ORDER BY created_at DESC
+    `;
+    const { rows } = await store._pool.query(q, [from, to]);
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="savopay_report_${from}_to_${to}.csv"`);
+
+    const header = 'payment_id,invoice_amount,invoice_currency,state,status,created_at\n';
+    const lines = rows.map(r =>
+      [r.payment_id, r.invoice_amount, r.invoice_currency, r.state, r.status, r.created_at].join(',')
+    );
+    res.send(header + lines.join('\n'));
+  } catch (err) {
+    console.error('report range.csv error:', err);
+    res.status(500).send('server error');
+  }
 });
 
 // Webhook audit: list recent events
