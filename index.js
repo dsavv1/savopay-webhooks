@@ -52,7 +52,6 @@ app.use(
   })
 );
 
-// CORS
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 const allowedOrigins = (
   isProd
@@ -74,7 +73,16 @@ app.use(
 );
 app.options(/.*/, cors());
 
-// Rate limit for start-payment
+// Minimal API request log
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - t0;
+    console.log(`${req.ip} ${req.method} ${req.originalUrl} -> ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
 const startPaymentLimiter = rateLimit({
   windowMs: 60_000,
   max: 20,
@@ -82,46 +90,38 @@ const startPaymentLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// ENV
 const PORT = process.env.PORT || 3000;
 
-// ForumPay dashboard API (informational)
 const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
 const FP_USER = process.env.FORUMPAY_USER || '';
 const FP_PASS = process.env.FORUMPAY_PASS || '';
 
-// ForumPay Payments API (Start/CheckPayment)
 const PAY_BASE = process.env.FORUMPAY_BASE_URL || 'https://sandbox.api.forumpay.com';
 const PAY_USER = process.env.FORUMPAY_PAY_USER || process.env.FORUMPAY_USER || '';
 const PAY_SECRET = process.env.FORUMPAY_PAY_SECRET || process.env.FORUMPAY_SECRET || '';
 const POS_ID = process.env.FORUMPAY_POS_ID || 'savopay-pos-01';
 
-// Webhook/callback
 const CALLBACK_URL = process.env.FORUMPAY_CALLBACK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || process.env.FORUMPAY_WEBHOOK_SECRET || '';
 
-// Email (SMTP)
 const SMTP_HOST = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.office365.com';
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
 const SMTP_USER = process.env.SMTP_USER || process.env.EMAIL_USER || '';
 const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
 const FROM_EMAIL = process.env.FROM_EMAIL || process.env.EMAIL_FROM || SMTP_USER || 'receipts@savopay.local';
 
-// Branding
 const BRAND_NAME = process.env.BRAND_NAME || 'SavoPay';
-const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || ''; // leave empty; we handle defaults below
+const BRAND_LOGO_PATH = process.env.BRAND_LOGO_PATH || '';
 const BRAND_ADDRESS = process.env.BRAND_ADDRESS || '';
 const BRAND_SUPPORT_EMAIL = process.env.BRAND_SUPPORT_EMAIL || '';
+const BRAND_VAT = process.env.BRAND_VAT || process.env.BRAND_ABN || '';
 
-// Built-in embedded fallback logo (small, optimized)
 const BRAND_LOGO_EMBED = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAARAAAAAwCAYAAABcQd4SAAABlUlEQVR4nO3cQY7CMBQF0c8m1v9LwVvW7h0wSYo6W6w6mS5w0m3x2Y0l9E6x0Zs2Yz2VgR7kLxg7k0Yx+7JQ7k9qgD8Y0aXg7i8N6bq6f5LwzCwAAAAAAAAAAAAAAAAAAAAAAAD4k0R3p9l5z4m1c7G+3h1q0q0M0H1k6f3c7S1b1+u+6dRk5wbrp3m8y3u3g2Xr9Y6m7q1IV9Xw2t8F8m4l5v8mV6g1G2bQb5GvQp9Q5o0h8lq8yq8b2mLw6cXy1q8bQk2b8S1Vqv8W3m3j6t8b6a9m8mXU6b5IY9Y0b6WgI1i0c3b4vL6m9vQm8oV1uW3qk5L7WgN1u0a3b4tL6n9tQm8oV1uW3qk5L7WgP1r0Y0Z+b/0mEw9t1bqgVbJ8n7mB1JrnHcVxZz0f9y4xv5n4HkI7z8Y8oW+e3jU0e7p8eQmV4mS9F0b0Yb0b0Yb0b0Yb0b0Yb0b8Tj2f1bA6f4z3fXx6c8g3kQAAAAAAAAAAAAAAAAAAAAAAAB/wN7dKcH6g9bqAAAAAElFTkSuQmCC';
 
-// Ops
 const CRON_RECHECK_MS = parseInt(process.env.CRON_RECHECK_MS || '60000', 10);
 const PENDING_MIN_AGE_SEC = parseInt(process.env.PENDING_MIN_AGE_SEC || '60', 10);
 const DISABLE_AUTO_RECHECK = (process.env.DISABLE_AUTO_RECHECK || '').toLowerCase() === 'true';
 
-// Admin Basic Auth
 function requireAdmin(req, res, next) {
   try {
     const hdr = req.headers.authorization || '';
@@ -138,7 +138,6 @@ function requireAdmin(req, res, next) {
 
 const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
 
-// Helpers
 function nowIso() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
@@ -147,12 +146,6 @@ async function parseMaybeJson(res) {
   try { return { kind: 'json', data: JSON.parse(text) }; }
   catch { return { kind: 'html', data: text }; }
 }
-
-// Resolve the logo source with multiple fallbacks:
-// 1) If BRAND_LOGO_PATH is a data: URL or http(s), use it.
-// 2) If BRAND_LOGO_PATH points to a file under /public, embed it as data URL.
-// 3) If /public/logo.png exists, embed it.
-// 4) Else use the built-in BRAND_LOGO_EMBED.
 function getLogoSrc() {
   const envVal = (BRAND_LOGO_PATH || '').trim();
   if (envVal) {
@@ -176,6 +169,16 @@ function getLogoSrc() {
   return BRAND_LOGO_EMBED || '';
 }
 
+function receiptSupportBlock() {
+  return (BRAND_ADDRESS || BRAND_SUPPORT_EMAIL || BRAND_VAT)
+    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee;font-size:12px;color:#374151">
+         ${BRAND_ADDRESS ? `<div>${BRAND_ADDRESS}</div>` : ``}
+         ${BRAND_VAT ? `<div>VAT/ABN: ${BRAND_VAT}</div>` : ``}
+         ${BRAND_SUPPORT_EMAIL ? `<div>Support: <a href="mailto:${BRAND_SUPPORT_EMAIL}">${BRAND_SUPPORT_EMAIL}</a></div>` : ``}
+       </div>`
+    : '';
+}
+
 function renderReceiptHTML(print_string) {
   let html = print_string || '';
   html = html
@@ -192,13 +195,6 @@ function renderReceiptHTML(print_string) {
     .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
     .replace(/<QR>.*?<\/QR>/g, '')
     .replace(/<BR>/g, '<br/>');
-
-  const supportBlock = (BRAND_ADDRESS || BRAND_SUPPORT_EMAIL)
-    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee;font-size:12px;color:#374151">
-         ${BRAND_ADDRESS ? `<div>${BRAND_ADDRESS}</div>` : ``}
-         ${BRAND_SUPPORT_EMAIL ? `<div>Support: <a href="mailto:${BRAND_SUPPORT_EMAIL}">${BRAND_SUPPORT_EMAIL}</a></div>` : ``}
-       </div>`
-    : '';
 
   const logoSrc = getLogoSrc();
 
@@ -220,7 +216,7 @@ function renderReceiptHTML(print_string) {
       </div>
       <div class="meta">Printed at ${new Date().toLocaleString()}</div>
       <div>${html}</div>
-      ${supportBlock}
+      ${receiptSupportBlock()}
     </div>
   </body></html>`;
 }
@@ -229,13 +225,6 @@ function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
   const address = p?.address || null;
-
-  const supportBlock = (BRAND_ADDRESS || BRAND_SUPPORT_EMAIL)
-    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee;font-size:12px;color:#374151">
-         ${BRAND_ADDRESS ? `<div>${BRAND_ADDRESS}</div>` : ``}
-         ${BRAND_SUPPORT_EMAIL ? `<div>Support: <a href="mailto:${BRAND_SUPPORT_EMAIL}">${BRAND_SUPPORT_EMAIL}</a></div>` : ``}
-       </div>`
-    : '';
 
   const logoSrc = getLogoSrc();
 
@@ -264,7 +253,7 @@ function renderPendingReceiptHTML(p) {
       ${address ? `<div class="row"><span class="label">Address:</span> ${address}</div>` : ''}
       <div class="row"><span class="label">Status:</span> ${p?.state || p?.status || 'created'}</div>
       <p style="margin-top:10px;color:#374151">This is a provisional receipt. You’ll receive a final receipt once the payment is confirmed.</p>
-      ${supportBlock}
+      ${receiptSupportBlock()}
     </div>
   </body></html>`;
 }
@@ -339,7 +328,6 @@ async function buildEmailHtml(payment) {
 
 const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
-// UI endpoints
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.get('/payments', async (_req, res) => {
@@ -349,7 +337,7 @@ app.get('/payments', async (_req, res) => {
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='' } = req.body || {};
+    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
     const params = new URLSearchParams();
@@ -385,6 +373,7 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
       network_processing_fee: data.network_processing_fee || null,
       last_transaction_time: null, invoice_date: null,
       amount: data.amount || null,
+      meta_tip_percent, meta_tip_amount, meta_base_amount,
     });
     return res.json(data);
   } catch (e) {
@@ -423,7 +412,6 @@ app.post('/payments/:payment_id/email', async (req, res) => {
   }
 });
 
-// Reports (admin)
 app.get('/report/daily', requireAdmin, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const q = `
@@ -453,7 +441,6 @@ app.get('/report/daily.csv', requireAdmin, async (req, res) => {
   res.type('text/csv').send(`date,confirmed,total\n${date},${confirmed},${total}\n`);
 });
 
-// Date range (admin)
 app.get('/report/range', requireAdmin, async (req, res) => {
   try {
     const from = req.query.from || new Date().toISOString().slice(0, 10);
@@ -508,14 +495,12 @@ app.get('/report/range.csv', requireAdmin, async (req, res) => {
   }
 });
 
-// Webhook audit
 app.get('/admin/webhook-events', requireAdmin, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
   const events = await store.listWebhookEvents(limit);
   res.json({ events });
 });
 
-// Webhook + logging
 app.post('/api/forumpay/callback', async (req, res) => {
   const token = req.query.token || '';
   const body = req.body || {};
@@ -562,7 +547,6 @@ app.post('/api/forumpay/callback', async (req, res) => {
   }
 });
 
-// Manual recheck
 app.post('/payments/:payment_id/recheck', async (req, res) => {
   try {
     const payment_id = req.params.payment_id;
@@ -590,7 +574,6 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
   }
 });
 
-// Admin trigger to recheck older pendings
 app.post('/admin/recheck-pending', requireAdmin, async (_req, res) => {
   try {
     const pendings = await store.listPendingOlderThan(PENDING_MIN_AGE_SEC, 25);
@@ -622,7 +605,6 @@ app.post('/admin/recheck-pending', requireAdmin, async (_req, res) => {
   }
 });
 
-// ForumPay info (optional)
 app.get('/api/health', async (_req, res) => {
   try {
     const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
@@ -658,12 +640,10 @@ app.get('/api/subaccount', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'GetSubAccount error', details: String(e) }); }
 });
 
-// Root
 app.get('/', (_req, res) => {
   res.type('text').send('SavoPay API is running. Try /health, /payments, /start-payment, /report/range, or /api/health');
 });
 
-// Optional background recheck
 if (!DISABLE_AUTO_RECHECK) {
   setInterval(async () => {
     try {
@@ -711,7 +691,7 @@ app.listen(PORT, () => {
     cron_ms: CRON_RECHECK_MS,
     pending_min_age_sec: PENDING_MIN_AGE_SEC,
     auto_recheck_disabled: DISABLE_AUTO_RECHECK,
-    brand: { BRAND_NAME, BRAND_LOGO_PATH, BRAND_ADDRESS, BRAND_SUPPORT_EMAIL },
+    brand: { BRAND_NAME, BRAND_LOGO_PATH, BRAND_ADDRESS, BRAND_SUPPORT_EMAIL, BRAND_VAT },
   });
   console.log(`SavoPay running at http://localhost:${PORT}`);
 });
