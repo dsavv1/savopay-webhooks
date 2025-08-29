@@ -28,6 +28,8 @@ app.use(
     crossOriginOpenerPolicy: { policy: 'same-origin' },
     crossOriginResourcePolicy: { policy: 'same-site' },
     referrerPolicy: { policy: 'no-referrer' },
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
   })
 );
 
@@ -35,19 +37,23 @@ app.use(
   helmet.contentSecurityPolicy({
     useDefaults: true,
     directives: {
-      "default-src": ["'self'"],
-      "img-src": ["'self'", "data:", "https://api.forumpay.com", "https://widget.forumpay.com"],
+      "default-src": ["'self'", "data:", "blob:", "capacitor:", "https:"],
+      "img-src": ["'self'", "data:", "blob:", "https:", "https://api.forumpay.com", "https://widget.forumpay.com"],
       "style-src": ["'self'", "'unsafe-inline'"],
-      "connect-src": ["'self'", "https://api.savopay.co", "https://widget.forumpay.com"],
+      "connect-src": [
+        "'self'",
+        "https://api.savopay.co",
+        "https://widget.forumpay.com",
+        "capacitor:",
+        "http://localhost"
+      ],
       "frame-src": ["'self'", "https://widget.forumpay.com"],
-      "script-src": ["'self'"],
+      "script-src": ["'self'", "'unsafe-inline'"],
       "object-src": ["'none'"],
       "base-uri": ["'self'"],
       "form-action": ["'self'"],
       "font-src": ["'self'", "https:", "data:"],
-      "frame-ancestors": ["'self'"],
-      "script-src-attr": ["'none'"],
-      "upgrade-insecure-requests": [],
+      "frame-ancestors": ["'self'"]
     },
   })
 );
@@ -55,8 +61,19 @@ app.use(
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 const allowedOrigins = (
   isProd
-    ? ['https://pos.savopay.co', process.env.UI_ORIGIN]
-    : ['http://localhost:3000', 'http://localhost:3002', 'https://pos.savopay.co', process.env.UI_ORIGIN]
+    ? [
+        'https://pos.savopay.co',
+        process.env.UI_ORIGIN,
+        'capacitor://localhost'
+      ]
+    : [
+        'http://localhost:3000',
+        'http://localhost:3002',
+        'https://pos.savopay.co',
+        process.env.UI_ORIGIN,
+        'capacitor://localhost',
+        'http://localhost'
+      ]
 ).filter(Boolean);
 
 app.use(
@@ -136,7 +153,8 @@ function requireAdmin(req, res, next) {
   }
 }
 
-const basicAuthHeader = 'Basic ' + Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
+const PAY_BASIC = Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
+const basicAuthHeader = 'Basic ' + PAY_BASIC;
 
 function nowIso() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -473,7 +491,7 @@ app.get('/report/range.csv', requireAdmin, async (req, res) => {
       WHERE (created_at AT TIME ZONE 'UTC')::date BETWEEN $1::date AND $2::date
       ORDER BY created_at DESC
     `;
-    const { rows } = await store._pool.query(q, [from, to]);
+  const { rows } = await store._pool.query(q, [from, to]);
 
     const cols = ["created_at","payment_id","order_id","invoice_amount","invoice_currency","crypto_amount","currency","state","status","customer_email","payer_id","confirmed","confirmed_time"];
     const esc = (v) => {
