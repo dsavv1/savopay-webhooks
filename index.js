@@ -1,4 +1,4 @@
-// index.js — SavoPay backend (savopay-webhooks)
+// index.js — SavoPay backend (savopaydashboards)
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -90,7 +90,6 @@ app.use(
 );
 app.options(/.*/, cors());
 
-// Minimal API request log
 app.use((req, res, next) => {
   const t0 = Date.now();
   res.on('finish', () => {
@@ -186,7 +185,6 @@ function getLogoSrc() {
   } catch {}
   return BRAND_LOGO_EMBED || '';
 }
-
 function receiptSupportBlock() {
   return (BRAND_ADDRESS || BRAND_SUPPORT_EMAIL || BRAND_VAT)
     ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee;font-size:12px;color:#374151">
@@ -196,7 +194,6 @@ function receiptSupportBlock() {
        </div>`
     : '';
 }
-
 function renderReceiptHTML(print_string) {
   let html = print_string || '';
   html = html
@@ -238,7 +235,6 @@ function renderReceiptHTML(print_string) {
     </div>
   </body></html>`;
 }
-
 function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
@@ -275,7 +271,6 @@ function renderPendingReceiptHTML(p) {
     </div>
   </body></html>`;
 }
-
 function makeTransporter() {
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) throw new Error('SMTP not configured');
   return nodemailer.createTransport({
@@ -291,7 +286,6 @@ async function sendReceiptEmail({ to, subject, html }) {
   const tx = makeTransporter();
   return tx.sendMail({ from: FROM_EMAIL, to, subject, html });
 }
-
 async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   const body = new URLSearchParams();
   body.set('pos_id', POS_ID);
@@ -309,7 +303,6 @@ async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
   return json;
 }
-
 async function ensurePrintString(payment) {
   let print_string = payment?.print_string || '';
   if (!print_string && payment?.address && payment?.currency) {
@@ -338,15 +331,36 @@ async function ensurePrintString(payment) {
   }
   return print_string;
 }
-
 async function buildEmailHtml(payment) {
   const printable = await ensurePrintString(payment);
   return printable ? renderReceiptHTML(printable) : renderPendingReceiptHTML(payment);
 }
-
 const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// ---- Currency Catalog (for POS UI) ----
+const DEFAULT_CATALOG = {
+  fiat: ['USD','EUR','GBP','NGN','AUD','CAD'],
+  crypto: [
+    { asset:'USDT', networks:['TRC20','ERC20','Polygon','BSC'] },
+    { asset:'USDC', networks:['Base','Polygon','ERC20','Arbitrum','Solana'] },
+    { asset:'BTC',  networks:['Bitcoin'] },
+    { asset:'ETH',  networks:['Ethereum'] },
+    { asset:'MATIC',networks:['Polygon'] },
+    { asset:'BNB',  networks:['BSC'] },
+    { asset:'XRP',  networks:['XRP'] },
+    { asset:'LTC',  networks:['Litecoin'] },
+  ],
+};
+app.get('/catalog', (_req, res) => res.json(DEFAULT_CATALOG));
+
+const PASSTHRU_NETWORK_IN_CURRENCY =
+  (process.env.ALLOW_PASSTHRU_NETWORK_IN_CURRENCY || '').toLowerCase() === 'true';
+function normalizeCurrencyForFP(input) {
+  if (PASSTHRU_NETWORK_IN_CURRENCY) return input || '';
+  return String(input || '').replace(/\s*\(.*\)\s*$/, '').split('-')[0].trim();
+}
 
 app.get('/payments', async (_req, res) => {
   try { res.json(await store.listPayments()); }
@@ -355,9 +369,21 @@ app.get('/payments', async (_req, res) => {
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
+    const {
+      invoice_amount='100.00',
+      invoice_currency='USD',
+      currency: uiCurrency='USDT',
+      payer_id='walk-in',
+      customer_email='',
+      meta_tip_percent=null,
+      meta_tip_amount=null,
+      meta_base_amount=null
+    } = req.body || {};
+
+    const currency = normalizeCurrencyForFP(uiCurrency);
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
+
     const params = new URLSearchParams();
     params.set('pos_id', POS_ID);
     params.set('invoice_amount', String(invoice_amount));
@@ -367,6 +393,7 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
+
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
       headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -491,7 +518,7 @@ app.get('/report/range.csv', requireAdmin, async (req, res) => {
       WHERE (created_at AT TIME ZONE 'UTC')::date BETWEEN $1::date AND $2::date
       ORDER BY created_at DESC
     `;
-  const { rows } = await store._pool.query(q, [from, to]);
+    const { rows } = await store._pool.query(q, [from, to]);
 
     const cols = ["created_at","payment_id","order_id","invoice_amount","invoice_currency","crypto_amount","currency","state","status","customer_email","payer_id","confirmed","confirmed_time"];
     const esc = (v) => {
