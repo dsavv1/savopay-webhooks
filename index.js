@@ -1,4 +1,4 @@
-// index.js — SavoPay backend (savopaydashboards)
+// index.js — SavoPay backend (standalone, in-memory store)
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -6,13 +6,40 @@ import fetch from 'node-fetch';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { store } from './store.js';
 import nodemailer from 'nodemailer';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function nowIso(){return new Date().toISOString().replace('T',' ').slice(0,19)}
+function parseIsoLike(s){try{return new Date(String(s).replace(' ','T')+'Z')}catch{return new Date()}}
+const payments=[]; const webhookEvents=[];
+const store={
+  async listPayments(){return payments.slice().sort((a,b)=>parseIsoLike(b.created_at)-parseIsoLike(a.created_at))},
+  async saveStart(obj){payments.push({...obj});return true},
+  async getPayment(id){return payments.find(p=>p.payment_id===id)||null},
+  async update(id,patch){const i=payments.findIndex(p=>p.payment_id===id);if(i>=0){payments[i]={...payments[i],...patch};return true}return false},
+  async listPendingOlderThan(ageSec=60,limit=25){const cutoff=Date.now()-ageSec*1000;return payments.filter(p=>!p.confirmed&&parseIsoLike(p.created_at).getTime()<cutoff).slice(0,limit)},
+  async logWebhookEvent(ev){webhookEvents.unshift({id:'wh_'+Date.now(),ts:new Date().toISOString(),...ev});return true},
+  async listWebhookEvents(limit=100){return webhookEvents.slice(0,limit)},
+  _pool:{query:async(q,params)=>{
+    if(q.includes("FILTER (WHERE state = 'confirmed')")){
+      const d=params?.[0];const dayRows=payments.filter(p=>new Date(p.created_at).toISOString().slice(0,10)===String(d));
+      const confirmed=dayRows.filter(p=>String(p.state)==='confirmed').length;
+      return{rows:[{confirmed_count:confirmed,total_count:dayRows.length}]}
+    }
+    if(q.includes('FROM payments')&&q.includes('BETWEEN')){
+      const from=params?.[0],to=params?.[1];
+      const inRange=p=>{const d=new Date(p.created_at).toISOString().slice(0,10);return d>=String(from)&&d<=String(to)}
+      const cols=["created_at","payment_id","order_id","invoice_amount","invoice_currency","crypto_amount","currency","state","status","customer_email","payer_id","confirmed","confirmed_time"];
+      const rows=payments.filter(inRange).sort((a,b)=>parseIsoLike(b.created_at)-parseIsoLike(a.created_at)).map(p=>{const r={};cols.forEach(c=>r[c]=p[c]??null);return r});
+      return{rows}
+    }
+    return{rows:[]}
+  }}
+};
 
 const app = express();
 app.disable('x-powered-by');
@@ -32,27 +59,20 @@ app.use(
     crossOriginEmbedderPolicy: false,
   })
 );
-
 app.use(
   helmet.contentSecurityPolicy({
     useDefaults: true,
     directives: {
-      "default-src": ["'self'", "data:", "blob:", "capacitor:", "https:"],
-      "img-src": ["'self'", "data:", "blob:", "https:", "https://api.forumpay.com", "https://widget.forumpay.com"],
-      "style-src": ["'self'", "'unsafe-inline'"],
-      "connect-src": [
-        "'self'",
-        "https://api.savopay.co",
-        "https://widget.forumpay.com",
-        "capacitor:",
-        "http://localhost"
-      ],
-      "frame-src": ["'self'", "https://widget.forumpay.com"],
-      "script-src": ["'self'", "'unsafe-inline'"],
+      "default-src": ["'self'","data:","blob:","capacitor:","https:"],
+      "img-src": ["'self'","data:","blob:","https:","https://api.forumpay.com","https://widget.forumpay.com"],
+      "style-src": ["'self'","'unsafe-inline'"],
+      "connect-src": ["'self'","https://api.savopay.co","https://widget.forumpay.com","capacitor:","http://localhost","http://10.0.2.2:3000"],
+      "frame-src": ["'self'","https://widget.forumpay.com"],
+      "script-src": ["'self'","'unsafe-inline'"],
       "object-src": ["'none'"],
       "base-uri": ["'self'"],
       "form-action": ["'self'"],
-      "font-src": ["'self'", "https:", "data:"],
+      "font-src": ["'self'","https:","data:"],
       "frame-ancestors": ["'self'"]
     },
   })
@@ -61,19 +81,8 @@ app.use(
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 const allowedOrigins = (
   isProd
-    ? [
-        'https://pos.savopay.co',
-        process.env.UI_ORIGIN,
-        'capacitor://localhost'
-      ]
-    : [
-        'http://localhost:3000',
-        'http://localhost:3002',
-        'https://pos.savopay.co',
-        process.env.UI_ORIGIN,
-        'capacitor://localhost',
-        'http://localhost'
-      ]
+    ? ['https://pos.savopay.co', process.env.UI_ORIGIN, 'capacitor://localhost']
+    : ['http://localhost:3000','http://localhost:3002','https://pos.savopay.co',process.env.UI_ORIGIN,'capacitor://localhost','http://localhost','http://10.0.2.2:3000']
 ).filter(Boolean);
 
 app.use(
@@ -155,9 +164,6 @@ function requireAdmin(req, res, next) {
 const PAY_BASIC = Buffer.from(`${PAY_USER}:${PAY_SECRET}`).toString('base64');
 const basicAuthHeader = 'Basic ' + PAY_BASIC;
 
-function nowIso() {
-  return new Date().toISOString().replace('T', ' ').slice(0, 19);
-}
 async function parseMaybeJson(res) {
   const text = await res.text();
   try { return { kind: 'json', data: JSON.parse(text) }; }
@@ -210,9 +216,7 @@ function renderReceiptHTML(print_string) {
     .replace(/<CUT>/g, "<hr style='border:none;border-top:2px dashed #222;margin:12px 0'/>")
     .replace(/<QR>.*?<\/QR>/g, '')
     .replace(/<BR>/g, '<br/>');
-
   const logoSrc = getLogoSrc();
-
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Receipt</title>
   <style>
@@ -239,9 +243,7 @@ function renderPendingReceiptHTML(p) {
   const fiat = p?.invoice_amount ? `${p.invoice_amount} ${p?.invoice_currency || ''}`.trim() : null;
   const crypto = p?.crypto_amount ? `${p.crypto_amount} ${p?.currency || ''}`.trim() : null;
   const address = p?.address || null;
-
   const logoSrc = getLogoSrc();
-
   return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Pending receipt</title>
   <style>
@@ -299,7 +301,7 @@ async function checkPaymentOnForumPay({ payment_id, currency, address }) {
   });
   const text = await resp.text();
   let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  console.log(`🔎 CheckPayment ${resp.status}: ${text}`);
+  console.log(`CheckPayment ${resp.status}: ${text}`);
   if (!resp.ok) throw new Error(`CheckPayment failed: ${resp.status}`);
   return json;
 }
@@ -339,28 +341,21 @@ const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${F
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ---- Currency Catalog (for POS UI) ----
-const DEFAULT_CATALOG = {
-  fiat: ['USD','EUR','GBP','NGN','AUD','CAD'],
-  crypto: [
-    { asset:'USDT', networks:['TRC20','ERC20','Polygon','BSC'] },
-    { asset:'USDC', networks:['Base','Polygon','ERC20','Arbitrum','Solana'] },
-    { asset:'BTC',  networks:['Bitcoin'] },
-    { asset:'ETH',  networks:['Ethereum'] },
-    { asset:'MATIC',networks:['Polygon'] },
-    { asset:'BNB',  networks:['BSC'] },
-    { asset:'XRP',  networks:['XRP'] },
-    { asset:'LTC',  networks:['Litecoin'] },
-  ],
-};
-app.get('/catalog', (_req, res) => res.json(DEFAULT_CATALOG));
-
-const PASSTHRU_NETWORK_IN_CURRENCY =
-  (process.env.ALLOW_PASSTHRU_NETWORK_IN_CURRENCY || '').toLowerCase() === 'true';
-function normalizeCurrencyForFP(input) {
-  if (PASSTHRU_NETWORK_IN_CURRENCY) return input || '';
-  return String(input || '').replace(/\s*\(.*\)\s*$/, '').split('-')[0].trim();
-}
+app.get('/catalog', (_req, res) => {
+  res.json({
+    fiat: ['USD','EUR','GBP','NGN','AUD','CAD'],
+    crypto: [
+      { asset:'USDT', networks:['TRC20','ERC20','Polygon','BSC'] },
+      { asset:'USDC', networks:['Base','Polygon','ERC20','Arbitrum','Solana'] },
+      { asset:'BTC',  networks:['Bitcoin'] },
+      { asset:'ETH',  networks:['Ethereum'] },
+      { asset:'MATIC',networks:['Polygon'] },
+      { asset:'BNB',  networks:['BSC'] },
+      { asset:'XRP',  networks:['XRP'] },
+      { asset:'LTC',  networks:['Litecoin'] },
+    ],
+  });
+});
 
 app.get('/payments', async (_req, res) => {
   try { res.json(await store.listPayments()); }
@@ -369,21 +364,9 @@ app.get('/payments', async (_req, res) => {
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const {
-      invoice_amount='100.00',
-      invoice_currency='USD',
-      currency: uiCurrency='USDT',
-      payer_id='walk-in',
-      customer_email='',
-      meta_tip_percent=null,
-      meta_tip_amount=null,
-      meta_base_amount=null
-    } = req.body || {};
-
-    const currency = normalizeCurrencyForFP(uiCurrency);
+    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
-
     const params = new URLSearchParams();
     params.set('pos_id', POS_ID);
     params.set('invoice_amount', String(invoice_amount));
@@ -393,7 +376,6 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     params.set('payer_id', String(payer_id || 'walk-in'));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
-
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
       method: 'POST',
       headers: { Authorization: basicAuthHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -519,21 +501,12 @@ app.get('/report/range.csv', requireAdmin, async (req, res) => {
       ORDER BY created_at DESC
     `;
     const { rows } = await store._pool.query(q, [from, to]);
-
     const cols = ["created_at","payment_id","order_id","invoice_amount","invoice_currency","crypto_amount","currency","state","status","customer_email","payer_id","confirmed","confirmed_time"];
-    const esc = (v) => {
-      let s = v == null ? '' : String(v);
-      if (/[",\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
-      return s;
-    };
+    const esc = (v) => { let s = v == null ? '' : String(v); if (/[",\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"'; return s; };
     const header = cols.join(',');
     const lines = rows.map(r => cols.map(c => esc(r[c])).join(','));
     const csv = [header, ...lines].join('\n');
-
-    res
-      .type('text/csv')
-      .set('Content-Disposition', `attachment; filename="savopay_report_${from}_to_${to}.csv"`)
-      .send(csv);
+    res.type('text/csv').set('Content-Disposition', `attachment; filename="savopay_report_${from}_to_${to}.csv"`).send(csv);
   } catch (e) {
     console.error('report/range.csv error', e);
     res.status(500).type('text/plain').send('range.csv failed');
@@ -550,24 +523,16 @@ app.post('/api/forumpay/callback', async (req, res) => {
   const token = req.query.token || '';
   const body = req.body || {};
   const payment_id = body.payment_id || null;
-
   if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
     await store.logWebhookEvent({ payment_id, status: 'invalid_token', error: 'Invalid token', payload: body });
     return res.status(403).json({ error: 'Invalid token' });
   }
-
   if (!body.payment_id || !body.currency || !body.address) {
     await store.logWebhookEvent({ payment_id, status: 'bad_request', error: 'Missing fields', payload: body });
     return res.status(400).json({ error: 'Missing fields', need: ['payment_id', 'currency', 'address'] });
   }
-
   try {
-    const ck = await checkPaymentOnForumPay({
-      payment_id: body.payment_id,
-      currency: body.currency,
-      address: body.address,
-    });
-
+    const ck = await checkPaymentOnForumPay({ payment_id: body.payment_id, currency: body.currency, address: body.address });
     const update = {
       status: ck.status || ck.state || null,
       state: ck.state || null,
@@ -582,7 +547,6 @@ app.post('/api/forumpay/callback', async (req, res) => {
       payer_id: ck.payer_id || null,
     };
     await store.update(body.payment_id, update);
-
     await store.logWebhookEvent({ payment_id, status: 'updated', payload: body, error: null });
     res.json({ ok: true });
   } catch (e) {
@@ -616,37 +580,6 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
   } catch (e) {
     console.error('recheck error', e);
     res.status(500).json({ error: 'recheck failed', detail: e.message });
-  }
-});
-
-app.post('/admin/recheck-pending', requireAdmin, async (_req, res) => {
-  try {
-    const pendings = await store.listPendingOlderThan(PENDING_MIN_AGE_SEC, 25);
-    let count = 0;
-    for (const p of pendings) {
-      try {
-        const ck = await checkPaymentOnForumPay({ payment_id: p.payment_id, currency: p.currency, address: p.address });
-        await store.update(p.payment_id, {
-          status: ck.status || ck.state || null,
-          state: ck.state || null,
-          confirmed: ck.confirmed ? 1 : 0,
-          confirmed_time: ck.confirmed_time || null,
-          crypto_amount: ck.amount || ck.payment || ck.crypto_amount || null,
-          print_string: ck.print_string || null,
-          amount_exchange: ck.amount_exchange || null,
-          network_processing_fee: ck.network_processing_fee || null,
-          last_transaction_time: ck.last_transaction_time || null,
-          invoice_date: ck.invoice_date || null,
-          payer_id: ck.payer_id || null,
-        });
-        count++;
-      } catch (e) {
-        console.error('auto-recheck error', p.payment_id, e.message);
-      }
-    }
-    res.json({ ok: true, checked: count });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
@@ -686,7 +619,7 @@ app.get('/api/subaccount', async (req, res) => {
 });
 
 app.get('/', (_req, res) => {
-  res.type('text').send('SavoPay API is running. Try /health, /payments, /start-payment, /report/range, or /api/health');
+  res.type('text').send('SavoPay API is running. Try /health, /catalog, /payments, /start-payment, /report/range, or /api/health');
 });
 
 if (!DISABLE_AUTO_RECHECK) {
@@ -731,7 +664,6 @@ app.listen(PORT, () => {
     dash_pass_present: !!FP_PASS,
     port: String(PORT),
     allowed_origin_list: allowedOrigins,
-    db_url_present: !!process.env.DATABASE_URL,
     smtp_present: !!(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS),
     cron_ms: CRON_RECHECK_MS,
     pending_min_age_sec: PENDING_MIN_AGE_SEC,
