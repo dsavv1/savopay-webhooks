@@ -10,9 +10,6 @@ import nodemailer from 'nodemailer';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit'; import metaSupported from './routes/metaSupported.js';
 
-// NEW: mount the supported-cryptos route (ESM)
-import metaSupported from './routes/metaSupported.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -343,9 +340,6 @@ async function buildEmailHtml(payment) {
 const fpHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${FP_USER}:${FP_PASS}`).toString('base64') });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// MOUNT the supported-cryptos route here
-app.use('/meta', metaSupported);
 
 app.get('/catalog', (_req, res) => {
   res.json({
