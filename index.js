@@ -8,7 +8,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit from 'express-rate-limit'; import metaSupported from './routes/metaSupported.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,7 +46,7 @@ app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'))); app.use('/meta', metaSupported);
 
 app.use(
   helmet({
@@ -357,10 +357,38 @@ app.get('/catalog', (_req, res) => {
   });
 });
 
+
 app.get('/payments', async (_req, res) => {
-  try { res.json(await store.listPayments()); }
-  catch (e) { console.error('payments error:', e); res.status(500).json({ error: 'payments failed', detail: e.message }); }
+  try {
+    return res.json(await store.listPayments());
+  } catch (e) {
+    console.error('payments error:', e);
+    return res.status(500).json({ error: 'payments failed', detail: e.message });
+  }
 });
+
+app.get('/payments/:payment_id', async (req, res) => {
+  try {
+    const p = await store.getPayment(req.params.payment_id);
+    if (!p) return res.status(404).json({ error: 'payment not found', payment_id: req.params.payment_id });
+    return res.json(p);
+  } catch (e) {
+    console.error('payment by id error:', e);
+    return res.status(500).json({ error: 'payment by id failed', detail: e.message });
+  }
+});
+
+app.get('/__routes', (_req, res) => {
+  const routes = (app._router?.stack || [])
+    .filter(r => r.route && r.route.path)
+    .map(r => {
+      const methods = Object.keys(r.route.methods || {});
+      const m = (methods[0] || 'get').toUpperCase();
+      return m + ' ' + r.route.path;
+    });
+  res.json({ routes });
+});
+
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
@@ -391,6 +419,20 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
       address: data.address || null,
       currency, invoice_amount, invoice_currency,
       crypto_amount: data.amount || null,
+      access_url: data.access_url || null,
+      access_token: data.access_token || null,
+      qr: data.qr || null,
+      qr_img: data.qr_img || null,
+      qr_alt: data.qr_alt || null,
+      qr_alt_img: data.qr_alt_img || null,
+      notices: data.notices || null,
+      rate: data.rate || null,
+      fast_transaction_fee: data.fast_transaction_fee || null,
+      fast_transaction_fee_currency: data.fast_transaction_fee_currency || null,
+      wait_time: data.wait_time || null,
+      min_confirmations: data.min_confirmations || null,
+      merchant_id: data.merchant_id || null,
+
       status: 'Created', state: 'created', confirmed: 0, confirmed_time: null,
       payer_id: String(payer_id || 'walk-in'),
       customer_email: customer_email || null,
