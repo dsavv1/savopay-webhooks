@@ -117,7 +117,7 @@ const startPaymentLimiter = rateLimit({
 
 const PORT = process.env.PORT || 3000;
 
-const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://dashboard.forumpay.com/pay/payInfo.api';
+const FP_BASE = process.env.FORUMPAY_API_BASE || 'https://api.forumpay.com/pay/payInfo.api';
 const FP_USER = process.env.FORUMPAY_USER || '';
 const FP_PASS = process.env.FORUMPAY_PASS || '';
 
@@ -627,7 +627,7 @@ app.post('/payments/:payment_id/recheck', async (req, res) => {
 
 app.get('/api/health', async (_req, res) => {
   try {
-    const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
+    const r = await fetch(`${FP_BASE}/GetSubAccounts/`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json({ ok: true, status: r.status, data: parsed.data });
     res.status(r.status || 502).json({
@@ -640,7 +640,7 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/subaccounts', async (_req, res) => {
   try {
-    const r = await fetch(`${FP_BASE}/GetSubAccounts`, { headers: fpHeaders() });
+    const r = await fetch(`${FP_BASE}/GetSubAccounts/`, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
     if (r.ok && parsed.kind === 'json') return res.json(parsed.data);
     res.status(r.status || 502).json({ error: 'GetSubAccounts failed', preview: parsed.kind === 'html' ? parsed.data.slice(0, 500) : parsed.data });
@@ -651,7 +651,7 @@ app.get('/api/subaccount', async (req, res) => {
   const sid = req.query.sid;
   if (!sid) return res.status(400).json({ error: 'Missing sid query param' });
   try {
-    const url = new URL(`${FP_BASE}/GetSubAccount`);
+    const url = new URL(`${FP_BASE}/GetSubAccount/`);
     url.searchParams.set('sid', sid);
     const r = await fetch(url, { headers: fpHeaders() });
     const parsed = await parseMaybeJson(r);
