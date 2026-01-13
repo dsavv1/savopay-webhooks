@@ -42,6 +42,19 @@ const store={
 };
 
 const app = express();
+
+app.get("/version", (req, res) => {
+  res.json({
+    ok: true,
+    build_sha:
+      process.env.SAVO_BUILD_SHA ||
+      process.env.RENDER_GIT_COMMIT ||
+      "unknown",
+    build_time: process.env.SAVO_BUILD_TIME || "unknown",
+    node: process.version,
+  });
+});
+
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
