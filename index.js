@@ -405,7 +405,7 @@ app.get('/__routes', (_req, res) => {
 
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
+    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', sid=null, customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
     const params = new URLSearchParams();
@@ -415,6 +415,7 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     params.set('currency', String(currency));
     params.set('payer_ip_address', '203.0.113.10');
     params.set('payer_id', String(payer_id || 'walk-in'));
+      if (sid) params.set('sid', String(sid));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
