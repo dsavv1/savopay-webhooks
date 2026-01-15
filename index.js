@@ -94,9 +94,25 @@ app.use(
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 const allowedOrigins = (
   isProd
-    ? ['https://pos.savopay.co', process.env.UI_ORIGIN, 'capacitor://localhost']
-    : ['http://localhost:3000','http://localhost:3002','https://pos.savopay.co',process.env.UI_ORIGIN,'capacitor://localhost','http://localhost','http://10.0.2.2:3000']
+    ? [
+        'https://pos.savopay.co',
+        process.env.UI_ORIGIN,
+        'capacitor://localhost',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+      ]
+    : [
+        'http://localhost:3000',
+        'http://localhost:3002',
+        'http://127.0.0.1:3000',
+        'https://pos.savopay.co',
+        process.env.UI_ORIGIN,
+        'capacitor://localhost',
+        'http://localhost',
+        'http://10.0.2.2:3000',
+      ]
 ).filter(Boolean);
+
 
 app.use(
   cors({
