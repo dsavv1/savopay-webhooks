@@ -15,6 +15,35 @@ const __dirname = path.dirname(__filename);
 
 function nowIso(){return new Date().toISOString().replace('T',' ').slice(0,19)}
 function parseIsoLike(s){try{return new Date(String(s).replace(' ','T')+'Z')}catch{return new Date()}}
+// Merchant routing: slug -> sid allow-list
+function safeJsonParse(s, fallback) {
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+
+const MERCHANT_MAP = safeJsonParse(process.env.MERCHANT_MAP_JSON || "{}", {});
+const ALLOWED_SIDS = new Set(Object.values(MERCHANT_MAP || {}).map(v => String(v)));
+
+function normalizeMerchantSlug(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\/+|\/+$/g, "");
+}
+
+function sidForMerchant(merchant) {
+  const key = normalizeMerchantSlug(merchant);
+  const sid = (MERCHANT_MAP && MERCHANT_MAP[key]) ? String(MERCHANT_MAP[key]) : null;
+  return sid;
+}
+
+function allowListEnabled() {
+  return ALLOWED_SIDS.size > 0;
+}
+
+function isAllowedSid(sid) {
+  if (!allowListEnabled()) return true;
+  return ALLOWED_SIDS.has(String(sid));
+}
 const payments=[]; const webhookEvents=[];
 const store={
   async listPayments(){return payments.slice().sort((a,b)=>parseIsoLike(b.created_at)-parseIsoLike(a.created_at))},
@@ -92,6 +121,8 @@ app.use(
 );
 
 const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+
+
 const allowedOrigins = (
   isProd
     ? [
@@ -419,9 +450,19 @@ app.get('/__routes', (_req, res) => {
 });
 
 
+app.get('/merchants', (_req, res) => {
+  const merchants = Object.entries(MERCHANT_MAP || {}).map(([merchant, sid]) => ({
+    merchant,
+    sid: String(sid),
+  }));
+  res.json({ ok: true, merchants, allowlist_enabled: allowListEnabled() });
+});
+
+
+
 app.post('/start-payment', startPaymentLimiter, async (req, res) => {
   try {
-    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', sid=null, customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
+    const { invoice_amount='100.00', invoice_currency='USD', currency='USDT', payer_id='walk-in', sid=null, merchant=null, customer_email='', meta_tip_percent=null, meta_tip_amount=null, meta_base_amount=null } = req.body || {};
     const order_id = `SVP-TEST-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     const cb_url = CALLBACK_URL ? `${CALLBACK_URL}?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : '';
     const params = new URLSearchParams();
@@ -431,7 +472,17 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     params.set('currency', String(currency));
     params.set('payer_ip_address', '203.0.113.10');
     params.set('payer_id', String(payer_id || 'walk-in'));
-      if (sid) params.set('sid', String(sid));
+      const resolvedSid = sid ? String(sid) : (merchant ? sidForMerchant(merchant) : null);
+
+      if (merchant && !resolvedSid) {
+        return res.status(400).json({ error: 'Unknown merchant', merchant: String(merchant) });
+      }
+
+      if (resolvedSid && !isAllowedSid(resolvedSid)) {
+        return res.status(403).json({ error: 'sid not allowed' });
+      }
+
+      if (resolvedSid) params.set('sid', String(resolvedSid));
     params.set('order_id', order_id);
     if (cb_url) params.set('callback_url', cb_url);
     const resp = await fetch(`${PAY_BASE}/pay/v2/StartPayment/`, {
@@ -446,6 +497,8 @@ app.post('/start-payment', startPaymentLimiter, async (req, res) => {
     await store.saveStart({
       payment_id: data.payment_id || null,
       order_id, pos_id: POS_ID,
+      sid: resolvedSid || null,
+      merchant: merchant ? String(merchant) : null,
       address: data.address || null,
       currency, invoice_amount, invoice_currency,
       crypto_amount: data.amount || null,
