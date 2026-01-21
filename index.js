@@ -450,6 +450,31 @@ app.get('/__routes', (_req, res) => {
 });
 
 
+app.get("/r/:status", async (req, res) => {
+  try {
+    const status = String(req.params.status || "").toLowerCase();
+    const payment_id = String(req.query.payment_id || "");
+    if (!payment_id) return res.redirect(302, "https://pos.savopay.co");
+
+    const p = await store.getPayment(payment_id);
+    const merchant = p && p.merchant ? String(p.merchant) : null;
+
+    if (!merchant) return res.redirect(302, "https://pos.savopay.co/pay/" + encodeURIComponent(payment_id));
+
+    if (status === "success") {
+      return res.redirect(302, "https://pos.savopay.co/m/" + encodeURIComponent(merchant) + "/success/" + encodeURIComponent(payment_id));
+    }
+    if (status === "cancelled" || status === "canceled" || status === "cancel") {
+      return res.redirect(302, "https://pos.savopay.co/m/" + encodeURIComponent(merchant) + "/cancelled/" + encodeURIComponent(payment_id));
+    }
+
+    return res.redirect(302, "https://pos.savopay.co/m/" + encodeURIComponent(merchant));
+  } catch (e) {
+    return res.redirect(302, "https://pos.savopay.co");
+  }
+});
+
+
 app.get('/merchants', (_req, res) => {
   const merchants = Object.entries(MERCHANT_MAP || {}).map(([merchant, sid]) => ({
     merchant,
