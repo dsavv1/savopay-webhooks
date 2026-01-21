@@ -3,7 +3,7 @@ import express from "express";
 const router = express.Router();
 
 // GET /meta/supported
-router.get("/meta/supported", (req, res) => {
+router.get("/supported", (req, res) => {
   res.json({
     fiat: ["USD", "GBP", "EUR", "NGN"],
     crypto: [
