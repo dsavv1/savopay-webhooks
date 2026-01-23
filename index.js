@@ -88,7 +88,7 @@ app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public'))); app.use('/meta', metaSupported);
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.use(
   helmet({
@@ -160,6 +160,8 @@ app.use(
   })
 );
 app.options(/.*/, cors());
+
+app.use('/meta', metaSupported);
 
 app.use((req, res, next) => {
   const t0 = Date.now();
